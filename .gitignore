@@ -1,0 +1,4 @@
+# Local research, kept out of the repository
+research/
+__pycache__/
+.DS_Store
