@@ -1,4 +1,4 @@
-# ProximaGraph: initial ideas
+# ProximaDB: initial ideas
 
 Draft, 2026-11-21.
 
@@ -15,24 +15,24 @@ Four nodes and four follows:
 | Node | ana | ben | cleo | phone |
 | Type | User | User | User | Device |
 
-| Edge number | 0 | 1 | 2 | 3 |
+| Link number | 0 | 1 | 2 | 3 |
 |---|---|---|---|---|
-| Edge | ana follows ben | ana follows cleo | ben follows cleo | cleo follows ana |
+| Link | ana follows ben | ana follows cleo | ben follows cleo | cleo follows ana |
 
 ## 3. Storage
 
-### 3.1 Nodes and edges
+### 3.1 Nodes and links
 
 - **Nodes:** one numbered list for all node types together, in creation order. A node's number is its place in the
   list.
-- **Edges:** one numbered list, the same way.
+- **Links:** one numbered list, the same way.
 
-### 3.2 Two tables per relation type
+### 3.2 Two tables per link type
 
 "Table" here is only the idea, a way to picture the data. What is actually stored for each table is the three
 arrays in 3.3, nothing else.
 
-For each relation type, two tables:
+For each link type, two tables:
 
 - "follows": for each node, whom it points to;
 - "followed by": for each node, who points to it.
@@ -41,7 +41,7 @@ The second one makes "who follows ana?" as fast as "whom does ana follow?".
 
 "Follows" for the example:
 
-| Node | Follows (edge number) |
+| Node | Follows (link number) |
 |---|---|
 | ana | ben (0), cleo (1) |
 | ben | cleo (2) |
@@ -53,17 +53,17 @@ The second one makes "who follows ana?" as fast as "whom does ana follow?".
 All rows are written back to back into one long array, so millions of nodes don't mean millions of separate small
 arrays scattered in memory.
 
-**Array 1, points to:** one entry per edge, the target node.
+**Array 1, points to:** one entry per link, the target node.
 
 | Position | 0 | 1 | 2 | 3 |
 |---|---|---|---|---|
 | Points to | ben (1) | cleo (2) | cleo (2) | ana (0) |
 
-**Array 2, edge number:** same positions as array 1.
+**Array 2, link number:** same positions as array 1.
 
 | Position | 0 | 1 | 2 | 3 |
 |---|---|---|---|---|
-| Edge | 0 | 1 | 2 | 3 |
+| Link | 0 | 1 | 2 | 3 |
 
 **Array 3, starts at:** where each node's part begins in arrays 1 and 2.
 
@@ -73,28 +73,28 @@ arrays scattered in memory.
 
 To read ana's row:
 1. ana starts at 0 and the next node (ben) at 2, so ana's part is positions 0 and 1.
-2. Array 1 at those positions gives ben and cleo; array 2 gives edges 0 and 1.
+2. Array 1 at those positions gives ben and cleo; array 2 gives links 0 and 1.
 
 Phone starts at 4 and so does "end", so phone's part is empty.
 
 **Sizes:**
-- Arrays 1 and 2 have one entry per edge of this type: as many as the rows of the link's join table in Quarry.
+- Arrays 1 and 2 have one entry per link of this type: as many as the rows of the link's join table in Quarry.
   Side by side, sorted by the source node, they *are* that join table.
 - Array 3 has one entry per node of every type, plus one ("end").
 
 The textbook name for this layout is CSR (compressed sparse row).
 
-**Number size (decided): 64-bit everywhere.** Node numbers, edge numbers and "starts at" positions are all 64-bit
-(8 bytes). No practical limit on nodes or edges; memory is the limit. Cost per edge of one relation
-type, stored both ways: 32 bytes (100 million edges: 3.2 GB; 1 billion: 32 GB), plus 8 bytes per node per table.
+**Number size (decided): 64-bit everywhere.** Node numbers, link numbers and "starts at" positions are all 64-bit
+(8 bytes). No practical limit on nodes or links; memory is the limit. Cost per link of one link
+type, stored both ways: 32 bytes (100 million links: 3.2 GB; 1 billion: 32 GB), plus 8 bytes per node per table.
 
 ### 3.4 Array 3 keeps every node (decided)
 
-Array 3 has an entry for every node, including nodes that can never have this relation (phone can't follow
+Array 3 has an entry for every node, including nodes that can never have this link type (phone can't follow
 anyone). Reasons:
 
 - **Direct lookup:** node n's part is always between entry n and entry n+1, one step for any node. Listing only nodes
-  with edges would need an extra "which node is this" array and a search for every lookup.
+  with links would need an extra "which node is this" array and a search for every lookup.
 - **One numbering everywhere:** node n is the same node in every table, so a walk can go user → device → location
   without translating numbers.
 - **Positions stay fixed:** node types are mixed in creation order, so leaving out a device in the middle would
@@ -118,21 +118,17 @@ that type (see 3.9), so a walk gets both in one memory read.
 |---|---|---|---|---|
 | Entry | type 0 (User), position 0 | type 0, position 1 | type 0, position 2 | type 1 (Device), position 0 |
 
-**`node_type::Masks`, built from it:** one `Bitset` per node type, one bit per node, kept for types used often.
-
-| Node | ana | ben | cleo | phone |
-|---|---|---|---|---|
-| User | 1 | 1 | 1 | 0 |
-| Device | 0 | 0 | 0 | 1 |
+No per-type "is this node a User" `Bitset`s: walks read a node's type from the map, which they read anyway for
+its position. (Dropped 2026-11-22: they were built but nothing used them.)
 
 There is no `Node` struct: a node is only its number, and its data is spread across the arrays.
 
 | Module | Holds |
 |---|---|
-| `node` | `node::GlobalId(u64)`: the node's number across all types (used by relation arrays, `Bitset`s, `node_type::Map`); `node::Id(u64)`: its position within its own type (used by property arrays), always paired with its `node_type::Id` |
-| `edge` | `edge::Id(u64)` |
-| `node_type` | `node_type::Id(u16)`, `node_type::Map` (type + position per node), `node_type::Masks` |
-| `bitset` | `Bitset`: a set of nodes, one bit per node (64 per `u64`); reused for "is a User", "visited", "in the current step" |
+| `node` | `node::GlobalId(u64)`: the node's number across all types (used by link type arrays, `Bitset`s, `node_type::Map`); `node::Id(u64)`: its position within its own type (used by property arrays), always paired with its `node_type::Id` |
+| `link` | `link::Id(u64)` |
+| `node_type` | `node_type::Id(u16)`, `node_type::Map` (type + position per node) |
+| `bitset` | `Bitset`: a set of nodes, one bit per node (64 per `u64`); reused for "visited", "in the current step", condition results |
 
 ### 3.6 Quarry ids ↔ node numbers (decided)
 
@@ -140,7 +136,7 @@ A Quarry object is identified by (object type, primary key). The primary key is 
 its object type, and never changes. Each object is one node.
 
 **A. Node number → primary key.** All keys written back to back in one byte array, plus a "starts at" array (keys
-have different lengths, the same trick as the relation tables):
+have different lengths, the same trick as the link type tables):
 
 | Node | ana | ben | cleo | phone | end |
 |---|---|---|---|---|---|
@@ -156,25 +152,25 @@ per node plus map overhead). On lookup, the key stored in A is compared, to rule
 
 | Backing | What identifies one link |
 |---|---|
-| Foreign key | (link type, a's key, b's key): already known from the edge's two ends and relation type |
+| Foreign key | (link type, a's key, b's key): already known from the link's two ends and link type |
 | Join dataset | the same |
 | Intermediary object | that object's primary key (see below) |
 
 **Intermediary-object links (decided):** a link type backed by an object type in the middle (e.g. Employment, with
-`person`, `company`, `role`, `start`) is stored as ordinary nodes: the Employment objects are nodes, with two relations,
+`person`, `company`, `role`, `start`) is stored as ordinary nodes: the Employment objects are nodes, with two link types,
 Employment → Person and Employment → Company. Conditions on the link's own properties are normal `through` conditions
 on Employment. ana → Acme takes 2 steps (ana → emp1 → Acme); the query layer counts such a link as one step when
 translating `max_steps`.
 
 ### 3.7 Type registry (decided)
 
-ProximaGraph translates Quarry's type ids itself: object type RID ↔ node type number, link type RID ↔ relation type
+ProximaDB translates Quarry's type ids itself: object type RID ↔ node type number, link type RID ↔ link type
 number. A small map, one entry per type, built from Quarry's ontology.
 
-### 3.8 No combined "any relation" table (decided)
+### 3.8 No combined "any link type" table (decided)
 
 There is no extra table of every connection of every type: a walk over any link reads,
-for each node it reaches, the tables of the relation types that apply to that node's type (known from the type
+for each node it reaches, the tables of the link types that apply to that node's type (known from the type
 registry). Saves storing all connections a second time and writing every edit twice. Can be added later if
 profiling shows the need.
 
@@ -237,10 +233,10 @@ and its side list only when the bit is set.
 **Rebuild** (every ~6 hours, or on an object-type schema change): renumber the nodes without the deleted ones,
 merge the side lists into the packed arrays, clear the `deleted` and removed-link bits.
 
-**Side store layout (decided): chunks in a pool.** Per relation table ("follows" and "followed by"):
+**Side store layout (decided): chunks in a pool.** Per link type table ("follows" and "followed by"):
 
 - **heads:** one entry per node, the position of its first chunk (or none);
-- **pool:** one append-only array of chunks; each chunk holds up to 8 entries (target `node::GlobalId`, `edge::Id`,
+- **pool:** one append-only array of chunks; each chunk holds up to 8 entries (target `node::GlobalId`, `link::Id`,
   sequence number; 24 bytes each), a count, and the position of the next chunk.
 
 Example, chunks of 2: ben follows ana (e4), dan (e6) and phone (e7); cleo follows ben (e5).
@@ -268,7 +264,7 @@ that happened while it ran (a value from just before or just after the edit, nev
 
 ### 3.12 Loading, rebuilds and snapshots (decided)
 
-- **Source:** not Quarry's tabular index. ProximaGraph reads the same files Holocron's generation transform reads
+- **Source:** not Quarry's tabular index. ProximaDB reads the same files Holocron's generation transform reads
   (`holocron-runtime/src/transforms/generation-transform.ts`): each object type's merged backing dataset, plus link
   backings (join datasets, foreign-key columns), through signed URLs.
 - **Reader:** DuckDB's Rust bindings (`duckdb` crate), with the same `scan` SQL as Quarry (`read_parquet` /
@@ -323,7 +319,7 @@ with no per-node reads.
 | JSON field | Meaning | Cypher |
 |---|---|---|
 | `from` | start node(s) | `(a:Person {name: "ana"})` |
-| `relations` | one or more relation types | `[:FOLLOWS]`, `[:FOLLOWS\|USES]` |
+| `link_types` | one or more link types | `[:FOLLOWS]`, `[:FOLLOWS\|USES]` |
 | `direction` | forward / backward / both | `->`, `<-`, `-` |
 | `max_steps` | up to how many steps | `*1..4` |
 | `through` | condition on every node stepped onto | `WHERE all(n IN nodes(p) WHERE n.age > 30)` |
@@ -400,7 +396,7 @@ tuned), so many small queries run side by side. Two-sided `path` walks use the s
 
 ## 5. Queries and writes
 
-### 5.1 Queries: ProximaGraph's own JSON shapes (decided)
+### 5.1 Queries: ProximaDB's own JSON shapes (decided)
 
 One shape per walk kind (`reach`, `path`, `loop`), sent by Quarry as JSON. Example: everyone ana can reach within 4
 follows, stepping only onto persons older than 30:
@@ -409,7 +405,7 @@ follows, stepping only onto persons older than 30:
 {
   "walk": "reach",
   "from": { "type": "Person", "key": "ana" },
-  "relation": "FOLLOWS",
+  "link_type": "FOLLOWS",
   "direction": "forward",
   "max_steps": 4,
   "through": { "property": "age", "op": ">", "value": 30 },
@@ -426,7 +422,7 @@ follows, stepping only onto persons older than 30:
 ### 5.2 Writes: direct bindings, no query language (decided)
 
 Quarry changes data through its own actions, so the query language has no create/update/delete. Quarry's action
-execution calls ProximaGraph directly: add a node, set a node's property, delete a node, add a link, remove a link.
+execution calls ProximaDB directly: add a node, set a node's property, delete a node, add a link, remove a link.
 Their exact form follows the edits design (3.11).
 
 ## 6. Implementation
