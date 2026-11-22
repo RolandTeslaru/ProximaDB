@@ -7,6 +7,8 @@
 //! | cleo | green (no such team) | | | | | | l3: cleo, camera (no such thing), 2025-07-01 |
 //! | dan | (none) | | | | | | |
 
+mod common;
+
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 
@@ -19,8 +21,9 @@ use proximadb::storage::Graph;
 
 
 fn graph() -> (Graph, Report) {
-    let dir = std::env::temp_dir().join(format!("proximadb-backings-{}", std::process::id()));
-    fs::create_dir_all(&dir).unwrap();
+    // A folder of this test's own: tests run in parallel.
+    let folder = common::Dir::new();
+    let dir = folder.path().to_path_buf();
 
     fs::write(
         dir.join("Person.csv"),
@@ -72,10 +75,7 @@ fn graph() -> (Graph, Report) {
         ],
     };
 
-    let loaded = load::load_with_report(&dir, &schema).unwrap();
-    fs::remove_dir_all(&dir).unwrap();
-
-    loaded
+    load::load_with_report(&dir, &schema).unwrap()
 }
 
 

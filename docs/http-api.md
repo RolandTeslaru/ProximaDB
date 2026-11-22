@@ -50,8 +50,14 @@ docker run -p 127.0.0.1:7600:7600 \
 ```
 
 The socket appears at `/run/proximadb/proximadb.sock`; share that volume with Quarry's container to connect over it.
-`.github/workflows/image.yml` builds both architectures on native runners and publishes one multi-architecture image to
-the GitHub container registry on every push to `main` and every `v*` tag.
+`.github/workflows/ci.yml` tests every pull request. A version tag that passes the tests publishes the image for both
+architectures, built on native runners, as `ghcr.io/rolandteslaru/proximadb:<version>` and `:latest`:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+Quarry should pin a version, not `latest`, so ProximaDB only changes under it when the version is bumped.
 
 
 ## Connecting from Quarry

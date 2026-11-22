@@ -10,6 +10,8 @@
 //!
 //! Follows: ana → ben, ana → cleo, ben → dan, cleo → eve, dan → eve. Owns: ana → phone, dan → laptop.
 
+mod common;
+
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::PathBuf;
@@ -23,8 +25,9 @@ use proximadb::storage::Graph;
 
 
 fn graph() -> Graph {
-    let dir = std::env::temp_dir().join(format!("proximadb-cypher-{}", std::process::id()));
-    fs::create_dir_all(&dir).unwrap();
+    // A folder of this test's own: tests run in parallel.
+    let folder = common::Dir::new();
+    let dir = folder.path().to_path_buf();
 
     fs::write(
         dir.join("Person.csv"),
@@ -63,10 +66,7 @@ fn graph() -> Graph {
         ],
     };
 
-    let graph = load::load(&PathBuf::from(&dir), &schema).unwrap();
-    fs::remove_dir_all(&dir).unwrap();
-
-    graph
+    load::load(&PathBuf::from(&dir), &schema).unwrap()
 }
 
 
