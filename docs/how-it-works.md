@@ -188,7 +188,8 @@ Conditions run before the walk, as bitsets: a **path filter** decides which node
 
 ## 9. Numbers
 
-Measured in process, without HTTP, on an Apple M3 Pro on a generated social graph (users, devices, locations; follows, uses, seen at, lives
+The server in Docker, queried with Cypher over HTTP, is measured in [Benchmarks](benchmarks.md). Below, measured in
+process, without HTTP, on an Apple M3 Pro on a generated social graph (users, devices, locations; follows, uses, seen at, lives
 in), one thread / twelve threads:
 
 | | S | M | L |
