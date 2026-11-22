@@ -68,8 +68,11 @@ impl<S: Read + Write> Client<S> {
         let stream = self.stream.get_mut();
 
         stream.write_all(head.as_bytes()).unwrap();
-        stream.write_all(body).unwrap();
-        stream.flush().unwrap();
+
+        // A request refused from its head alone (a wrong content type) is answered and the connection closed
+        // without reading the body, so writing the body may fail. The answer is still there to receive.
+        let _ = stream.write_all(body);
+        let _ = stream.flush();
     }
 
 
@@ -222,6 +225,27 @@ impl Server {
 
     pub fn log(&self) -> String {
         fs::read_to_string(self.dir.path().join("log")).unwrap_or_default()
+    }
+
+
+    /// Sends SIGTERM, as `docker stop` does, and waits up to `within` for the process to exit.
+    pub fn terminate(&mut self, within: Duration) -> Option<std::process::ExitStatus> {
+        Command::new("kill")
+            .args(["-TERM", &self.process.id().to_string()])
+            .status()
+            .unwrap();
+
+        let started = Instant::now();
+
+        while started.elapsed() < within {
+            if let Some(status) = self.process.try_wait().unwrap() {
+                return Some(status);
+            }
+
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        None
     }
 
 
