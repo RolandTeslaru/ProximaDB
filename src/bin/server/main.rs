@@ -16,6 +16,7 @@
 //!   number and is published whole. With no action for a while, the writer runs its idle check (rebuilds).
 //! - Cypher (`cypher`): a subset of Cypher, answered as a graph to draw and a count.
 //! - Read-your-writes: a read with `after: N` waits until action N is published.
+//! - Reloads (`reload`): Quarry's sync rewrote the datasets; load them again and swap the new graph in.
 //!
 //! Every request is checked (`check`) before it reaches the engine: a release build aborts on a panic, so a wrong
 //! name or value must be a 400, never a panic.
@@ -27,6 +28,7 @@ mod check;
 mod config;
 mod cypher;
 mod reads;
+mod reload;
 mod schema;
 mod state;
 mod writes;
@@ -36,6 +38,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use axum::Router;
@@ -49,7 +52,7 @@ use proximadb::Store;
 use proximadb::load;
 
 use crate::config::Config;
-use crate::state::{AppState, Shared};
+use crate::state::{AppState, Shared, Source};
 
 /// musl's own allocator is slow with many threads; mimalloc is fast everywhere.
 #[global_allocator]
@@ -80,7 +83,12 @@ fn run() -> Result<(), String> {
 
     let store = load_store(&config)?;
 
-    let state = start_writer(store);
+    let source = Source {
+        schema: config.schema.clone(),
+        data: config.data.clone(),
+    };
+
+    let state = start_writer(store, source);
 
     serve(config, router(state))
 }
@@ -109,27 +117,13 @@ fn load_store(config: &Config) -> Result<&'static Store, String> {
 
 /// What the load skipped: rows without a key or with a duplicate key, and links that are empty or point nowhere.
 fn print_skipped(report: &load::Report) {
-    for node_type in &report.node_types {
-        if node_type.without_key + node_type.duplicate_keys > 0 {
-            eprintln!(
-                "  {}: {} rows without a key, {} with a duplicate key",
-                node_type.name, node_type.without_key, node_type.duplicate_keys
-            );
-        }
-    }
-
-    for link_type in &report.link_types {
-        if link_type.empty + link_type.dangling > 0 {
-            eprintln!(
-                "  {}: {} links, {} with an empty key, {} pointing to no node",
-                link_type.name, link_type.links, link_type.empty, link_type.dangling
-            );
-        }
+    for message in reload::skipped_of(report) {
+        eprintln!("  {message}");
     }
 }
 
 
-fn start_writer(store: &'static Store) -> Shared {
+fn start_writer(store: &'static Store, source: Source) -> Shared {
     let (writes, queue) = mpsc::channel(writes::WRITE_QUEUE);
     let (published_sender, published) = watch::channel(store.current().live.published());
 
@@ -143,6 +137,8 @@ fn start_writer(store: &'static Store) -> Shared {
         reads: Semaphore::new(rayon::current_num_threads()),
         writes,
         published,
+        source,
+        reloading: AtomicBool::new(false),
     })
 }
 
@@ -154,6 +150,7 @@ fn router(state: Shared) -> Router {
         .route("/path", post(reads::path))
         .route("/cypher", post(cypher::cypher))
         .route("/actions", post(writes::action))
+        .route("/reload", post(reload::reload))
         .with_state(state)
 }
 

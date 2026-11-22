@@ -256,6 +256,39 @@ impl Writer<'_> {
     }
 
 
+    /// Replaces the packed graph with `graph`, which already holds every action up to `as_of_seq`, as when Quarry
+    /// reloads its datasets. A running rebuild is discarded. The writer works on the new graph at once, but searches
+    /// keep the old one until `make_current`: replay the actions after `as_of_seq` in between, so no search sees the
+    /// data go back in time.
+    pub fn replace(&mut self, graph: Graph, as_of_seq: u64) {
+        if let Some(building) = self.state.building.take() {
+            let _ = building.handle.join();
+        }
+
+        let generation = Arc::new(Generation {
+            live: Live::starting_at(&graph, as_of_seq),
+            graph,
+        });
+
+        self.state.editor = Editor::new(generation);
+        self.state.journal.clear();
+        self.state.link_edits = 0;
+        self.state.node_edits = 0;
+        self.state
+            .set_limits(self.store.share, self.store.min_edits);
+    }
+
+
+    /// Makes the graph the writer works on the one new searches use (after `replace`).
+    pub fn make_current(&mut self) {
+        *self
+            .store
+            .current
+            .write()
+            .expect("no writer panics holding the lock") = self.state.editor.generation().clone();
+    }
+
+
     /// Costs of the rebuilds finished so far, oldest first.
     pub fn rebuild_stats(&self) -> &[RebuildStats] {
         &self.state.finished

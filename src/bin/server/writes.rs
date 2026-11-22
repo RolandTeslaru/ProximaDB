@@ -7,8 +7,11 @@
 //!   3. Applies the edits, publishes the action at once, and tells the readers waiting on it.
 //!
 //! With no action for `IDLE`, it runs the writer's idle check, which may start or finish a rebuild.
+//!
+//! It keeps the last `KEPT_ACTIONS` actions it applied, as they arrived (by key, not node number), so that a graph
+//! reloaded from Quarry's datasets as of some action can take every later one again (`reload`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use axum::Json;
@@ -23,13 +26,16 @@ use proximadb::storage::node_type;
 
 use crate::api::{ActionRequest, ActionResponse, ApiError, ApiResult, bad};
 use crate::check::{Checked, Target, check_action};
-use crate::state::{Shared, WriteJob};
+use crate::state::{Shared, Swapped, WriteJob};
 
 /// Actions waiting for the writer; a full queue makes callers wait.
 pub(crate) const WRITE_QUEUE: usize = 1024;
 
 /// With no action for this long, the writer runs its idle check.
 const IDLE: Duration = Duration::from_millis(50);
+
+/// Actions kept for replay after a reload. A reload as of an older action than these is refused.
+const KEPT_ACTIONS: usize = 1_000_000;
 
 
 pub(crate) async fn action(
@@ -42,7 +48,7 @@ pub(crate) async fn action(
 
     state
         .writes
-        .send(WriteJob { action, reply })
+        .send(WriteJob::Action { action, reply })
         .await
         .map_err(|_| writer_stopped())?;
 
@@ -64,7 +70,12 @@ pub(crate) fn writer_thread(
         .build()
         .expect("a single-threaded runtime always builds");
 
-    let mut writer = store.writer();
+    let mut thread = WriterThread {
+        writer: store.writer(),
+        published,
+        kept: VecDeque::new(),
+        dropped_through: 0,
+    };
 
     runtime.block_on(async {
         loop {
@@ -75,21 +86,108 @@ pub(crate) fn writer_thread(
                 Ok(None) => break,
 
                 Err(_) => {
-                    writer.idle();
+                    thread.writer.idle();
                     continue;
                 }
             };
 
-            let seq = job.action.seq;
-            let result = apply(&mut writer, job.action);
+            match job {
+                WriteJob::Action { action, reply } => {
+                    let _ = reply.send(thread.action(action));
+                }
 
-            if result.is_ok() {
-                let _ = published.send(seq);
+                WriteJob::Swap {
+                    graph,
+                    as_of_seq,
+                    reply,
+                } => {
+                    let _ = reply.send(thread.swap(*graph, as_of_seq));
+                }
             }
-
-            let _ = job.reply.send(result);
         }
     });
+}
+
+
+struct WriterThread {
+    writer: Writer<'static>,
+    published: watch::Sender<u64>,
+    /// The last actions applied, oldest first.
+    kept: VecDeque<ActionRequest>,
+    /// The newest action no longer kept (0 when none was dropped).
+    dropped_through: u64,
+}
+
+
+impl WriterThread {
+    fn action(&mut self, action: ActionRequest) -> Result<ActionResponse, String> {
+        let done = apply(&mut self.writer, action.clone())?;
+
+        let _ = self.published.send(action.seq);
+
+        self.keep(action);
+
+        Ok(done)
+    }
+
+
+    fn keep(&mut self, action: ActionRequest) {
+        self.kept.push_back(action);
+
+        if self.kept.len() > KEPT_ACTIONS {
+            let dropped = self.kept.pop_front().expect("over the limit, so not empty");
+
+            self.dropped_through = dropped.seq;
+        }
+    }
+
+
+    /// Swaps in a graph reloaded as of `as_of_seq`: the kept actions after it are applied again first, then searches
+    /// move to it.
+    fn swap(
+        &mut self,
+        graph: proximadb::storage::Graph,
+        as_of_seq: u64,
+    ) -> Result<Swapped, String> {
+        if as_of_seq < self.dropped_through {
+            return Err(format!(
+                "the reloaded data is as of action {as_of_seq}, but actions up to {} are no longer kept: reload \
+                 from newer data",
+                self.dropped_through
+            ));
+        }
+
+        self.writer.replace(graph, as_of_seq);
+
+        let later: Vec<ActionRequest> = self
+            .kept
+            .iter()
+            .filter(|action| action.seq > as_of_seq)
+            .cloned()
+            .collect();
+
+        let mut failed = Vec::new();
+
+        for action in &later {
+            if let Err(reason) = apply(&mut self.writer, action.clone()) {
+                failed.push(format!("action {}: {reason}", action.seq));
+            }
+        }
+
+        self.writer.make_current();
+
+        // The data holds the actions up to `as_of_seq`; the ones kept after it now sit on top.
+        self.kept.retain(|action| action.seq > as_of_seq);
+
+        let seq = self.writer.generation().live.published();
+        let _ = self.published.send(seq);
+
+        Ok(Swapped {
+            replayed: later.len(),
+            failed,
+            seq,
+        })
+    }
 }
 
 

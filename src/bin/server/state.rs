@@ -1,12 +1,15 @@
 //! What every handler shares: the store, the read slots, the writer's queue and the last published action.
 
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 
 use proximadb::Store;
+use proximadb::storage::Graph;
 
 use crate::api::{ActionRequest, ActionResponse, ApiError};
 
@@ -14,10 +17,37 @@ use crate::api::{ActionRequest, ActionResponse, ApiError};
 const AFTER_TIMEOUT: Duration = Duration::from_secs(10);
 
 
-/// One action for the writer thread, and where its result goes.
-pub(crate) struct WriteJob {
-    pub(crate) action: ActionRequest,
-    pub(crate) reply: oneshot::Sender<Result<ActionResponse, String>>,
+/// Work for the writer thread, and where its result goes.
+pub(crate) enum WriteJob {
+    Action {
+        action: ActionRequest,
+        reply: oneshot::Sender<Result<ActionResponse, String>>,
+    },
+
+    /// A freshly loaded graph holding every action up to `as_of_seq`, to take the current one's place.
+    Swap {
+        graph: Box<Graph>,
+        as_of_seq: u64,
+        reply: oneshot::Sender<Result<Swapped, String>>,
+    },
+}
+
+
+/// What swapping in a reloaded graph did.
+pub(crate) struct Swapped {
+    /// Kept actions after `as_of_seq`, applied again on the new graph.
+    pub(crate) replayed: usize,
+    /// Of those, the ones that no longer apply (say, a link to a node the new data doesn't have).
+    pub(crate) failed: Vec<String>,
+    /// The last action the new graph holds.
+    pub(crate) seq: u64,
+}
+
+
+/// Where the data comes from, for reloads: the schema file is read again each time.
+pub(crate) struct Source {
+    pub(crate) schema: PathBuf,
+    pub(crate) data: PathBuf,
 }
 
 
@@ -26,6 +56,9 @@ pub(crate) struct AppState {
     pub(crate) reads: Semaphore,
     pub(crate) writes: mpsc::Sender<WriteJob>,
     pub(crate) published: watch::Receiver<u64>,
+    pub(crate) source: Source,
+    /// A reload is running; another one is refused until it ends.
+    pub(crate) reloading: AtomicBool,
 }
 
 

@@ -45,7 +45,7 @@ pub(crate) fn timed<T>(result: ApiResult<T>, took: std::time::Duration) -> Timed
 }
 
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub(crate) struct NodeRef {
     #[serde(rename = "type")]
     pub(crate) node_type: String,
@@ -73,7 +73,7 @@ impl From<Dir> for Direction {
 }
 
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(untagged)]
 pub(crate) enum JsonValue {
     Bool(bool),
@@ -199,14 +199,14 @@ pub(crate) struct PathResponse {
 
 
 /// One action: Quarry's sequence number (strictly increasing) and its edits, applied and published together.
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 pub(crate) struct ActionRequest {
     pub(crate) seq: u64,
     pub(crate) edits: Vec<Edit>,
 }
 
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub(crate) enum Edit {
     AddNode {
