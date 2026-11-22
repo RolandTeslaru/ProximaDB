@@ -534,6 +534,22 @@ impl<'a> View<'a> {
     }
 
 
+    /// Every node of `node_type` this view sees, by position within the type: packed ones, then added ones.
+    /// Deleted nodes keep their place.
+    pub fn nodes_of(&self, node_type: node_type::Id) -> Vec<node::GlobalId> {
+        let map = &self.graph.node_type_mappings;
+        let first = map.first(node_type).0;
+        let packed = (first..first + map.count(node_type)).map(node::GlobalId);
+
+        // Added nodes of this type, in the order they were added (which is their position order).
+        let added = (self.live.base_nodes..self.nodes)
+            .map(node::GlobalId)
+            .filter(|&g| self.get(g).0 == node_type);
+
+        packed.chain(added).collect()
+    }
+
+
     /// How many nodes of `node_type` this view sees: packed ones plus those added up to `upto`.
     pub fn count(&self, node_type: node_type::Id) -> u64 {
         let packed = self.graph.node_type_mappings.count(node_type);

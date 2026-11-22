@@ -1,17 +1,22 @@
 //! A parsed query, checked against the graph and run as a walk.
 //!
-//!   1. Resolve the start node from its label and primary key (`(a:User {nodeId: 42})`).
-//!   2. Resolve the link pattern: link types, direction, and how many steps.
-//!   3. Turn the conditions into filters: `WHERE` on the end node, and the inline `(r, n | …)` filter on every node
-//!      stepped onto. Both need the end node's label, since a condition is evaluated over one node type.
+//!   1. Split `WHERE` by the node each part is about: the start node or the end node.
+//!   2. Resolve the start: one node by its primary key (`(a:User {nodeId: 42})`), or every node of a label that meets
+//!      its conditions (`(a:User {status: 'active'})`, `WHERE a.age > 40`).
+//!   3. Resolve the link pattern: link types, direction, how many steps, and the filters: on the end node, and the
+//!      inline `(r, n | …)` filter on every node stepped onto.
 //!   4. Run: a shortest path, a graph of the nearest matches, a count, or both.
+//!
+//! The walk takes its first step from the starts without marking them seen, so with many starts, a start reached
+//! from another start is a match like any other node. A node's distance is its shortest one from any start.
 
 use std::collections::HashMap;
 
+use crate::collections::Bitset;
 use crate::core::node::GlobalId;
 use crate::core::{Direction, Value};
 use crate::kinetic::live::View;
-use crate::query::condition::{self, Condition};
+use crate::query::condition::{self, Condition, Op};
 use crate::query::subgraph::{self, EndFilter, Role, Subgraph};
 use crate::query::walk::{self, Reach, Through};
 use crate::storage::link_type;
@@ -23,7 +28,7 @@ use super::{Answer, CypherError, DEFAULT_LIMIT, MAX_DEPTH, MAX_LIMIT};
 
 /// The query, resolved against the graph.
 struct Plan {
-    start: GlobalId,
+    starts: Vec<GlobalId>,
     link_types: Vec<link_type::Id>,
     direction: Direction,
     min_steps: u32,
@@ -33,19 +38,33 @@ struct Plan {
 }
 
 
+/// The parts of `WHERE`, by the node they are about.
+#[derive(Default)]
+struct Conditions {
+    start: Vec<Condition>,
+    end: Vec<Condition>,
+}
+
+
 pub fn run(
     view: &View,
     query: &Query,
     params: &HashMap<String, Value>,
 ) -> Result<Answer, CypherError> {
-    let start = find(view, &query.start, params)?;
+    for item in &query.returns {
+        check_returned(item, query)?;
+    }
+
+    let conditions = split_where(query, params)?;
+    let starts = starts_of(view, &query.start, conditions.start, params)?;
+    let limit = query.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT) as usize;
 
     let Some((link, end_node)) = &query.step else {
-        return Ok(single_node(start));
+        return Ok(nodes_only(&starts, limit));
     };
 
     if query.shortest {
-        return shortest_path(view, query, start, link, end_node, params);
+        return shortest_path(view, query, &starts, link, end_node, params);
     }
 
     if !end_node.properties.is_empty() {
@@ -54,26 +73,21 @@ pub fn run(
         ));
     }
 
-    let plan = resolve(view, query, start, link, end_node, params)?;
+    counts_only_the_end(query)?;
 
-    let end_name = end_node.name.as_deref();
+    let plan = resolve(view, starts, link, end_node, conditions.end, params)?;
+
     let wants_graph = query
         .returns
         .iter()
         .any(|item| matches!(item, ReturnItem::Name(_)));
 
-    for item in &query.returns {
-        check_returned(item, query, end_name)?;
-    }
-
     let count = count_matches(view, &plan);
 
     let graph = wants_graph.then(|| {
-        let limit = query.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT) as usize;
-
         subgraph::neighbourhood(
             view,
-            &plan.reach(),
+            &plan.reach(&plan.starts),
             plan.min_steps,
             plan.end.as_ref(),
             limit,
@@ -89,9 +103,9 @@ pub fn run(
 
 
 impl Plan {
-    fn reach(&self) -> Reach<'_> {
+    fn reach<'a>(&'a self, starts: &'a [GlobalId]) -> Reach<'a> {
         Reach {
-            starts: std::slice::from_ref(&self.start),
+            starts,
             link_types: &self.link_types,
             direction: self.direction,
             max_steps: self.max_steps,
@@ -102,20 +116,200 @@ impl Plan {
 }
 
 
-fn single_node(start: GlobalId) -> Answer {
+/// `MATCH (a…) RETURN a`: the nodes themselves.
+fn nodes_only(starts: &[GlobalId], limit: usize) -> Answer {
+    let shown = starts
+        .iter()
+        .take(limit)
+        .map(|&node| (node, Role::Match))
+        .collect();
+
     Answer {
         graph: Some(Subgraph {
-            nodes: vec![(start, Role::Start)],
+            nodes: shown,
             links: Vec::new(),
-            truncated: false,
+            truncated: starts.len() > limit,
         }),
-        count: Some(1),
+        count: Some(starts.len() as u64),
         path_length: None,
     }
 }
 
 
-// ---------------------------------------------------------------- 1. the start node
+fn check_returned(item: &ReturnItem, query: &Query) -> Result<(), CypherError> {
+    let name = match item {
+        ReturnItem::Name(name) | ReturnItem::Count { name } => name.as_str(),
+    };
+
+    let start_name = query.start.name.as_deref();
+    let end_name = query.step.as_ref().and_then(|(_, end)| end.name.as_deref());
+    let link_name = query
+        .step
+        .as_ref()
+        .and_then(|(link, _)| link.name.as_deref());
+    let path_name = query.path_name.as_deref();
+
+    let known = [start_name, end_name, link_name, path_name].contains(&Some(name));
+
+    if !known {
+        return Err(CypherError::plain(format!(
+            "{name} isn't named in the MATCH pattern"
+        )));
+    }
+
+    Ok(())
+}
+
+
+/// With a link, `count(…)` counts end nodes; counting the starts that reach one isn't supported yet.
+fn counts_only_the_end(query: &Query) -> Result<(), CypherError> {
+    let start_name = query.start.name.as_deref();
+
+    for item in &query.returns {
+        if let ReturnItem::Count { name } = item
+            && Some(name.as_str()) == start_name
+        {
+            return Err(CypherError::plain(
+                "count the end node: counting the starts that reach one isn't supported yet",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+
+// ---------------------------------------------------------------- 1. WHERE, split by node
+
+
+/// `WHERE` as a list of parts joined by `AND`, each about the start node or the end node alone.
+fn split_where(query: &Query, params: &HashMap<String, Value>) -> Result<Conditions, CypherError> {
+    let mut conditions = Conditions::default();
+
+    let Some(expr) = &query.condition else {
+        return Ok(conditions);
+    };
+
+    let start_name = query.start.name.as_deref();
+    let end_name = query.step.as_ref().and_then(|(_, end)| end.name.as_deref());
+
+    for part in conjuncts(expr) {
+        let names = names_in(part);
+
+        let [name] = names.as_slice() else {
+            return Err(CypherError::plain(
+                "each part of WHERE joined by AND must be about one node; OR and NOT can't mix two nodes",
+            ));
+        };
+
+        let condition = condition_for(part, Some(name), "WHERE", params)?;
+
+        if Some(*name) == end_name {
+            conditions.end.push(condition);
+        } else if Some(*name) == start_name {
+            conditions.start.push(condition);
+        } else {
+            return Err(CypherError::plain(format!(
+                "WHERE uses {name}, which isn't a node in the pattern"
+            )));
+        }
+    }
+
+    Ok(conditions)
+}
+
+
+fn conjuncts(expr: &Expr) -> Vec<&Expr> {
+    match expr {
+        Expr::And(left, right) => {
+            let mut parts = conjuncts(left);
+            parts.extend(conjuncts(right));
+            parts
+        }
+
+        other => vec![other],
+    }
+}
+
+
+/// The node names a condition uses, each once.
+fn names_in(expr: &Expr) -> Vec<&str> {
+    let mut names = match expr {
+        Expr::Compare { name, .. } | Expr::IsNull { name, .. } => vec![name.as_str()],
+
+        Expr::And(left, right) | Expr::Or(left, right) => {
+            let mut both = names_in(left);
+            both.extend(names_in(right));
+            both
+        }
+
+        Expr::Not(inner) => names_in(inner),
+    };
+
+    names.sort_unstable();
+    names.dedup();
+
+    names
+}
+
+
+// ---------------------------------------------------------------- 2. the starts
+
+
+/// One node by its primary key, or every node of the label that meets the conditions.
+fn starts_of(
+    view: &View,
+    node: &NodePattern,
+    conditions: Vec<Condition>,
+    params: &HashMap<String, Value>,
+) -> Result<Vec<GlobalId>, CypherError> {
+    let label = node.label.as_deref().ok_or_else(|| {
+        CypherError::plain("give the start node's label, e.g. (a:User) or (a:User {nodeId: 42})")
+    })?;
+    let node_type = node_type_named(view, label)?;
+    let primary_key = &view.graph.node_types[node_type].primary_key;
+
+    let by_key = matches!(node.properties.as_slice(), [(name, _)] if name == primary_key);
+
+    if by_key && conditions.is_empty() {
+        return Ok(vec![find(view, node, params)?]);
+    }
+
+    // Inline properties are equalities, like WHERE a.status = 'active'.
+    let mut all = conditions;
+
+    for (name, value) in &node.properties {
+        if name == primary_key {
+            return Err(CypherError::plain(format!(
+                "give {label} by its {primary_key} alone, or filter it without the key"
+            )));
+        }
+
+        all.push(Condition::compare(name, Op::Eq, value_of(value, params)?));
+    }
+
+    let allowed = match all.len() {
+        0 => None,
+        1 => Some(evaluated(
+            view,
+            node_type,
+            all.pop().expect("one condition"),
+        )?),
+        _ => Some(evaluated(view, node_type, Condition::And(all))?),
+    };
+
+    let starts = view
+        .nodes_of(node_type)
+        .into_iter()
+        .enumerate()
+        .filter(|&(position, node)| {
+            !view.is_deleted(node) && allowed.as_ref().is_none_or(|bits| bits.get(position))
+        })
+        .map(|(_, node)| node)
+        .collect();
+
+    Ok(starts)
+}
 
 
 /// A node given by its label and primary key, e.g. `(a:User {nodeId: 42})`.
@@ -124,14 +318,12 @@ fn find(
     node: &NodePattern,
     params: &HashMap<String, Value>,
 ) -> Result<GlobalId, CypherError> {
-    let graph = view.graph;
-
     let label = node
         .label
         .as_deref()
         .ok_or_else(|| CypherError::plain("give the node's label, e.g. (a:User {nodeId: 42})"))?;
     let node_type = node_type_named(view, label)?;
-    let primary_key = &graph.node_types[node_type].primary_key;
+    let primary_key = &view.graph.node_types[node_type].primary_key;
 
     let [(key_name, key_value)] = node.properties.as_slice() else {
         return Err(CypherError::plain(format!(
@@ -185,31 +377,25 @@ fn value_of(literal: &Literal, params: &HashMap<String, Value>) -> Result<Value,
 }
 
 
-// ---------------------------------------------------------------- 2. and 3. the link pattern and its filters
+// ---------------------------------------------------------------- 3. the link pattern and its filters
 
 
 fn resolve(
     view: &View,
-    query: &Query,
-    start: GlobalId,
+    starts: Vec<GlobalId>,
     link: &LinkPattern,
     end_node: &NodePattern,
+    end_conditions: Vec<Condition>,
     params: &HashMap<String, Value>,
 ) -> Result<Plan, CypherError> {
     let (min_steps, max_steps) = steps(link)?;
     let link_types = link_types_named(view, &link.types)?;
+
     let end_type = end_node
         .label
         .as_deref()
         .map(|label| node_type_named(view, label))
         .transpose()?;
-
-    let end_name = end_node.name.as_deref();
-
-    let end_condition = match &query.condition {
-        Some(expr) => Some(condition_for(expr, end_name, "WHERE", params)?),
-        None => None,
-    };
 
     let through_condition = match &link.filter {
         Some((name, expr)) => Some(condition_for(
@@ -221,9 +407,9 @@ fn resolve(
         None => None,
     };
 
-    let needs_label = end_condition.is_some() || through_condition.is_some();
+    let filtered = !end_conditions.is_empty() || through_condition.is_some();
 
-    if needs_label && end_type.is_none() {
+    if filtered && end_type.is_none() {
         return Err(CypherError::plain(
             "label the end node to filter on its properties, e.g. (b:User)",
         ));
@@ -232,18 +418,16 @@ fn resolve(
     let end = match end_type {
         Some(node_type) => Some(EndFilter {
             node_type,
-            allowed: end_condition
-                .map(|c| evaluated(view, node_type, c))
-                .transpose()?,
+            allowed: all_of(view, node_type, end_conditions)?,
         }),
 
         None => None,
     };
 
     let through = match (through_condition, end_type) {
-        (Some(c), Some(node_type)) => {
+        (Some(condition), Some(node_type)) => {
             let mut through = Through::new(view.graph, false);
-            through.set(node_type, evaluated(view, node_type, c)?);
+            through.set(node_type, evaluated(view, node_type, condition)?);
 
             Some(through)
         }
@@ -252,7 +436,7 @@ fn resolve(
     };
 
     Ok(Plan {
-        start,
+        starts,
         link_types,
         direction: link.direction,
         min_steps,
@@ -260,6 +444,22 @@ fn resolve(
         end,
         through,
     })
+}
+
+
+/// The conditions joined by AND and evaluated, or `None` when there are none.
+fn all_of(
+    view: &View,
+    node_type: node_type::Id,
+    mut conditions: Vec<Condition>,
+) -> Result<Option<Bitset>, CypherError> {
+    let condition = match conditions.len() {
+        0 => return Ok(None),
+        1 => conditions.pop().expect("one condition"),
+        _ => Condition::And(conditions),
+    };
+
+    Ok(Some(evaluated(view, node_type, condition)?))
 }
 
 
@@ -370,7 +570,7 @@ fn evaluated(
     view: &View,
     node_type: node_type::Id,
     condition: Condition,
-) -> Result<crate::collections::Bitset, CypherError> {
+) -> Result<Bitset, CypherError> {
     let condition =
         condition::checked(view.graph, node_type, condition).map_err(CypherError::plain)?;
 
@@ -378,56 +578,72 @@ fn evaluated(
 }
 
 
-fn check_returned(
-    item: &ReturnItem,
-    query: &Query,
-    end_name: Option<&str>,
-) -> Result<(), CypherError> {
-    let name = match item {
-        ReturnItem::Name(name) | ReturnItem::Count { name } => name.as_str(),
-    };
-
-    let start_name = query.start.name.as_deref();
-    let link_name = query
-        .step
-        .as_ref()
-        .and_then(|(link, _)| link.name.as_deref());
-    let path_name = query.path_name.as_deref();
-
-    let known = [start_name, end_name, link_name, path_name].contains(&Some(name));
-
-    if !known {
-        return Err(CypherError::plain(format!(
-            "{name} isn't named in the MATCH pattern"
-        )));
-    }
-
-    Ok(())
-}
-
-
 // ---------------------------------------------------------------- 4. running
 
 
-/// Every match, counted exactly with the parallel walk: nodes at `min_steps` or more that meet the end filter.
+/// Every match, counted exactly with the parallel walk: one step from the starts (without marking them), then the
+/// rest of the steps from there. Nodes nearer than `min_steps` don't count.
 fn count_matches(view: &View, plan: &Plan) -> u64 {
-    let walked = walk::reach(view, &plan.reach());
+    let end = plan.end.as_ref();
+    let counts = |node: &&GlobalId| matches(view, end, **node);
 
-    // `reached` is in step order: skip the steps nearer than `min_steps`.
+    let first = walk::first_step(view, &plan.reach(&plan.starts));
+
+    if plan.min_steps == 0 {
+        return count_including_starts(view, plan, &first);
+    }
+
+    let mut count = 0;
+
+    if plan.min_steps <= 1 {
+        count += first.iter().filter(counts).count() as u64;
+    }
+
+    if plan.max_steps <= 1 {
+        return count;
+    }
+
+    let rest = Reach {
+        max_steps: plan.max_steps - 1,
+        ..plan.reach(&first)
+    };
+
+    let walked = walk::reach(view, &rest);
+
+    // `reached` is in step order, from step 2: skip the steps nearer than `min_steps`.
     let too_near: u64 = walked
         .per_step
         .iter()
-        .take(plan.min_steps.saturating_sub(1) as usize)
+        .take(plan.min_steps.saturating_sub(2) as usize)
         .sum();
 
-    let start_counts = plan.min_steps == 0 && matches(view, plan.end.as_ref(), plan.start);
-
-    let far_enough = walked.reached[too_near as usize..]
+    count += walked.reached[too_near as usize..]
         .iter()
-        .filter(|&&node| matches(view, plan.end.as_ref(), node))
+        .filter(counts)
         .count() as u64;
 
-    far_enough + start_counts as u64
+    count
+}
+
+
+/// With `*0..`, the starts are matches too, and a start may also be a step from another: count each node once.
+fn count_including_starts(view: &View, plan: &Plan, first: &[GlobalId]) -> u64 {
+    let mut found: rustc_hash::FxHashSet<GlobalId> =
+        plan.starts.iter().chain(first).copied().collect();
+
+    if plan.max_steps > 1 {
+        let rest = Reach {
+            max_steps: plan.max_steps - 1,
+            ..plan.reach(first)
+        };
+
+        found.extend(walk::reach(view, &rest).reached);
+    }
+
+    found
+        .into_iter()
+        .filter(|&node| matches(view, plan.end.as_ref(), node))
+        .count() as u64
 }
 
 
@@ -449,11 +665,17 @@ fn matches(view: &View, end: Option<&EndFilter>, node: GlobalId) -> bool {
 fn shortest_path(
     view: &View,
     query: &Query,
-    start: GlobalId,
+    starts: &[GlobalId],
     link: &LinkPattern,
     end_node: &NodePattern,
     params: &HashMap<String, Value>,
 ) -> Result<Answer, CypherError> {
+    let [start] = starts else {
+        return Err(CypherError::plain(
+            "shortestPath needs both ends given by their key",
+        ));
+    };
+
     if end_node.properties.is_empty() {
         return Err(CypherError::plain(
             "shortestPath needs both ends given by their key",
@@ -487,7 +709,7 @@ fn shortest_path(
 
     let path = subgraph::shortest_path(
         view,
-        start,
+        *start,
         end,
         &link_types,
         link.direction,

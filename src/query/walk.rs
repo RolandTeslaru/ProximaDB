@@ -166,6 +166,16 @@ pub fn reach(view: &View, q: &Reach) -> ReachResult {
     }
 }
 
+/// Every node one step from `q.starts` (each once), stepping only where `q.through` allows. Unlike `reach`, the
+/// starts aren't marked first: a start one step from another start is in the result.
+pub fn first_step(view: &View, q: &Reach) -> Vec<GlobalId> {
+    let tables = view.tables_by_type(q.link_types, q.direction);
+    let visited = AtomicBitset::new(view.node_count());
+
+    push_step(view, &tables, q.through, &visited, q.starts)
+}
+
+
 /// Push: go through the current step and mark each node's neighbours.
 fn push_step(
     view: &View,

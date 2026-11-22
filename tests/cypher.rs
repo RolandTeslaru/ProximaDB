@@ -226,10 +226,6 @@ fn errors_say_what_is_wrong() {
             "maximum length",
         ),
         (
-            "MATCH (a:Person {status: 'active'})-[:FOLLOWS]->(b) RETURN b",
-            "found by key",
-        ),
-        (
             "MATCH (a:Person {key: 'nobody'}) RETURN a",
             "no Person with key nobody",
         ),
@@ -246,9 +242,14 @@ fn errors_say_what_is_wrong() {
             "wrong type",
         ),
         (
-            "MATCH (a:Person {key: 'ana'})-[:FOLLOWS]->(b:Person) WHERE a.age > 1 RETURN b",
-            "only use properties",
+            "MATCH (a:Person)-[:FOLLOWS]->(b:Person) WHERE a.age > 40 OR b.age > 40 RETURN b",
+            "about one node",
         ),
+        (
+            "MATCH (a:Person)-[:FOLLOWS]->(b:Person) RETURN count(a)",
+            "count the end node",
+        ),
+        ("MATCH (a)-[:FOLLOWS]->(b) RETURN b", "start node's label"),
         (
             "MATCH (a:Person {key: 'ana'})-[:LIKES]->(b) RETURN b",
             "no link type LIKES",
@@ -277,4 +278,66 @@ fn errors_say_what_is_wrong() {
             "{query}\n  said: {message}\n  expected: {expected}"
         );
     }
+}
+
+
+#[test]
+fn starting_from_every_node_that_matches() {
+    let g = graph();
+
+    // A filter alone: people over 40 are ben and dan.
+    let older = run(&g, "MATCH (a:Person) WHERE a.age > 40 RETURN a");
+    assert_eq!(older.count, Some(2));
+    assert_eq!(
+        keys(&g, &older, Role::Match),
+        ["ben", "dan"].map(String::from).into()
+    );
+
+    // Inline properties are equalities: everyone active but cleo.
+    let active = run(&g, "MATCH (a:Person {status: 'active'}) RETURN count(a)");
+    assert_eq!(active.count, Some(4));
+
+    // Everyone followed by anyone. Every one of them is also a start: they still count, each once.
+    let followed = run(
+        &g,
+        "MATCH (a:Person)-[:FOLLOWS]->(b:Person) RETURN count(b)",
+    );
+    assert_eq!(followed.count, Some(4));
+
+    // Whom people over 40 follow: ben → dan, dan → eve. Ben appears as the start dan was reached from.
+    let theirs = run(
+        &g,
+        "MATCH (a:Person)-[:FOLLOWS]->(b:Person) WHERE a.age > 40 RETURN a, b",
+    );
+    assert_eq!(theirs.count, Some(2));
+    assert_eq!(
+        keys(&g, &theirs, Role::Match),
+        ["dan", "eve"].map(String::from).into()
+    );
+    assert_eq!(
+        keys(&g, &theirs, Role::Start),
+        ["ben"].map(String::from).into()
+    );
+    assert_eq!(theirs.graph.as_ref().unwrap().links.len(), 2);
+
+    // Filters on both ends: active people followed by someone over 40.
+    let both = run(
+        &g,
+        "MATCH (a:Person)-[:FOLLOWS]->(b:Person) WHERE a.age > 40 AND b.status = 'active' RETURN count(b)",
+    );
+    assert_eq!(both.count, Some(2));
+
+    // Backwards from things: who owns anything.
+    let owners = run(&g, "MATCH (t:Thing)<-[:OWNS]-(p:Person) RETURN p");
+    assert_eq!(
+        keys(&g, &owners, Role::Match),
+        ["ana", "dan"].map(String::from).into()
+    );
+
+    // Distance 0 includes the starts themselves: cleo, and eve whom she follows.
+    let with_self = run(
+        &g,
+        "MATCH (a:Person {status: 'inactive'})-[:FOLLOWS*0..1]->(b:Person) RETURN count(b)",
+    );
+    assert_eq!(with_self.count, Some(2));
 }

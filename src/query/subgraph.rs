@@ -61,6 +61,10 @@ pub struct EndFilter {
 
 
 /// Breadth-first from `q.starts`, up to `limit` matches at a distance between `min_steps` and `q.max_steps`.
+///
+/// The starts aren't marked as seen before the first step, so a start reached from another start (or from itself,
+/// around a loop) counts like any other node. In the drawing, a start appears only if a match is reached from it,
+/// unless there is a single start, which always appears.
 pub fn neighbourhood(
     view: &View,
     q: &Reach,
@@ -72,13 +76,19 @@ pub fn neighbourhood(
     let visit_budget = limit.saturating_mul(VISITS_PER_RESULT).max(limit);
 
     let mut parent: FxHashMap<GlobalId, (GlobalId, LinkRef)> = FxHashMap::default();
-    let mut seen: FxHashSet<GlobalId> = q.starts.iter().copied().collect();
+    let mut seen: FxHashSet<GlobalId> = FxHashSet::default();
     let mut queue: VecDeque<(GlobalId, u32)> = q.starts.iter().map(|&s| (s, 0)).collect();
     let mut matches = Vec::new();
     let mut truncated = false;
 
     if min_steps == 0 {
-        matches.extend(q.starts.iter().copied().filter(|&s| is_match(view, end, s)));
+        matches.extend(
+            q.starts
+                .iter()
+                .copied()
+                .filter(|&s| is_match(view, end, s))
+                .take(limit),
+        );
     }
 
     'walk: while let Some((u, depth)) = queue.pop_front() {
@@ -108,7 +118,7 @@ pub fn neighbourhood(
                 }
 
                 if matches.len() >= limit || seen.len() >= visit_budget {
-                    truncated = !queue.is_empty() || matches.len() >= limit;
+                    truncated = true;
                     break 'walk;
                 }
             }
@@ -117,7 +127,9 @@ pub fn neighbourhood(
 
     matches.truncate(limit);
 
-    tree_of(q.starts, &matches, &parent, truncated)
+    let always_shown = if q.starts.len() == 1 { q.starts } else { &[] };
+
+    tree_of(always_shown, &matches, &parent, truncated)
 }
 
 
@@ -212,31 +224,29 @@ fn link_of(table: &TableRef, u: GlobalId, v: GlobalId) -> LinkRef {
 }
 
 
-/// The starts, the matches, and every node and link on the way from a start to a match.
+/// The matches, every node and link on the way back to the start each was reached from, and those starts. A node
+/// with no parent is a start; `always_shown` starts appear even with no match.
 fn tree_of(
-    starts: &[GlobalId],
+    always_shown: &[GlobalId],
     matches: &[GlobalId],
     parent: &FxHashMap<GlobalId, (GlobalId, LinkRef)>,
     truncated: bool,
 ) -> Subgraph {
-    let mut roles: FxHashMap<GlobalId, Role> = starts.iter().map(|&s| (s, Role::Start)).collect();
-    let mut order: Vec<GlobalId> = starts.to_vec();
+    let mut roles: FxHashMap<GlobalId, Role> =
+        always_shown.iter().map(|&s| (s, Role::Start)).collect();
+    let mut order: Vec<GlobalId> = always_shown.to_vec();
     let mut links = Vec::new();
 
     for &m in matches {
-        match roles.get(&m) {
-            Some(Role::Start) => continue,
-            Some(_) => {
-                roles.insert(m, Role::Match);
-                continue;
-            }
-            None => {
-                roles.insert(m, Role::Match);
-                order.push(m);
-            }
+        let already_shown = roles.insert(m, Role::Match).is_some();
+
+        if already_shown {
+            continue;
         }
 
-        // Walk back towards the start, until a node already in the tree.
+        order.push(m);
+
+        // Walk back towards the start, until a node already in the drawing.
         let mut node = m;
 
         while let Some(&(previous, link)) = parent.get(&node) {
@@ -246,7 +256,13 @@ fn tree_of(
                 break;
             }
 
-            roles.insert(previous, Role::Via);
+            let role = if parent.contains_key(&previous) {
+                Role::Via
+            } else {
+                Role::Start
+            };
+
+            roles.insert(previous, role);
             order.push(previous);
             node = previous;
         }
