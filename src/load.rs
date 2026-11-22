@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use crate::collections::IndexVec;
+use crate::core::link;
 use crate::storage::graph::Graph;
 use crate::storage::keys::{KeyIndex, PrimaryKeys};
 use crate::storage::link_type;
@@ -92,11 +93,10 @@ pub fn load(dir: &Path, schema: &Schema) -> Result<Graph, Box<dyn std::error::Er
             .ok_or(format!("unknown node type {name}"))
     };
 
-    // Link types: (from, to, link) triples, then the two tables.
-    let n = map.len();
-    let mut next_link = 0u64;
+    // Link types: (from position, to position, link) triples, then the two tables.
     let mut link_types = IndexVec::new();
     for spec in &schema.link_types {
+        let mut next_link = 0u32;
         let (ft, tt) = (type_id(&spec.from_type)?, type_id(&spec.to_type)?);
         let mut reader = csv::Reader::from_path(dir.join(&spec.file))?;
         let headers = reader.headers()?.clone();
@@ -117,17 +117,26 @@ pub fn load(dir: &Path, schema: &Schema) -> Result<Graph, Box<dyn std::error::Er
             let to = key_index
                 .get(&keys, &map, tt, &record[tc])
                 .ok_or("link to an unknown object")?;
-            triples.push((from.0, to.0, next_link));
+            triples.push((map.get(from).1, map.get(to).1, link::Id(next_link)));
             next_link += 1;
         }
-        link_types.push(link_type::Storage::build(&spec.name, ft, tt, n, &triples));
+        link_types.push(link_type::Storage::build(
+            &spec.name,
+            ft,
+            tt,
+            map.count(ft) as usize,
+            map.count(tt) as usize,
+            &triples,
+        ));
     }
 
-    Ok(Graph {
+    let in_file_order = Graph {
         node_types,
-        nodes: map,
+        node_type_mappings: map,
         link_types,
         keys,
         key_index,
-    })
+    };
+    // Lay the nodes out with linked nodes close together: a rebuild with no edits renumbers them.
+    Ok(crate::kinetic::rebuild::rebuild(&in_file_order, &[]).graph)
 }

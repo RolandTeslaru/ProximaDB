@@ -7,6 +7,7 @@ use rayon::prelude::*;
 use crate::collections::IndexVec;
 use crate::collections::bitset::{AtomicBitset, Bitset};
 use crate::core::Direction;
+use crate::core::node::GlobalId;
 use crate::kinetic::live::{TableRef, View};
 use crate::storage::graph::Graph;
 use crate::storage::link_type;
@@ -38,18 +39,18 @@ impl Through {
         self.per_type[t] = Some(allowed);
     }
 
+    /// Whether node `g` of type `t` meets the conditions.
     #[inline]
-    pub fn allows(&self, view: &View, g: u64) -> bool {
-        let (t, local) = view.get(g);
+    pub fn allows(&self, view: &View, t: node_type::Id, g: GlobalId) -> bool {
         match &self.per_type[t] {
-            Some(b) => b.get(local.index()),
+            Some(b) => b.get(view.position(t, g).index()),
             None => self.others_allowed,
         }
     }
 }
 
 pub struct Reach<'a> {
-    pub starts: &'a [u64],
+    pub starts: &'a [GlobalId],
     pub link_types: &'a [link_type::Id],
     pub direction: Direction,
     pub max_steps: u32,
@@ -60,7 +61,7 @@ pub struct Reach<'a> {
 
 pub struct ReachResult {
     /// Every node reached, without the starts, as global ids.
-    pub reached: Vec<u64>,
+    pub reached: Vec<GlobalId>,
     pub per_step: Vec<u64>,
     pub capped: bool,
     pub pull_steps: u32,
@@ -77,14 +78,18 @@ fn reverse(d: Direction) -> Direction {
 }
 
 #[inline]
-fn degree(view: &View, tables: &IndexVec<node_type::Id, Vec<TableRef>>, g: u64) -> u64 {
+fn degree(view: &View, tables: &IndexVec<node_type::Id, Vec<TableRef>>, g: GlobalId) -> u64 {
     tables[view.type_of(g)]
         .iter()
         .map(|t| view.degree(t, g))
         .sum()
 }
 
-fn degree_sum(view: &View, tables: &IndexVec<node_type::Id, Vec<TableRef>>, nodes: &[u64]) -> u64 {
+fn degree_sum(
+    view: &View,
+    tables: &IndexVec<node_type::Id, Vec<TableRef>>,
+    nodes: &[GlobalId],
+) -> u64 {
     if nodes.len() >= PARALLEL_MIN && rayon::current_num_threads() > 1 {
         nodes
             .par_iter()
@@ -108,11 +113,11 @@ pub fn reach(view: &View, q: &Reach) -> ReachResult {
         .sum();
 
     let visited = AtomicBitset::new(n);
-    let mut frontier: Vec<u64> = q
+    let mut frontier: Vec<GlobalId> = q
         .starts
         .iter()
         .copied()
-        .filter(|&s| visited.test_and_set(s as usize))
+        .filter(|&s| visited.test_and_set(s.index()))
         .collect();
     let mut reached = Vec::new();
     let mut per_step = Vec::new();
@@ -167,19 +172,19 @@ fn push_step(
     tables: &IndexVec<node_type::Id, Vec<TableRef>>,
     through: Option<&Through>,
     visited: &AtomicBitset,
-    frontier: &[u64],
-) -> Vec<u64> {
-    let expand = |u: u64, out: &mut Vec<u64>| {
+    frontier: &[GlobalId],
+) -> Vec<GlobalId> {
+    let expand = |u: GlobalId, out: &mut Vec<GlobalId>| {
         for table in &tables[view.type_of(u)] {
             view.for_each(table, u, |v| {
-                if visited.get(v as usize) {
+                if visited.get(v.index()) {
                     return;
                 }
-                if view.is_deleted(v) || through.is_some_and(|t| !t.allows(view, v)) {
-                    visited.test_and_set(v as usize); // never allowed: don't look at it again
+                if view.is_deleted(v) || through.is_some_and(|t| !t.allows(view, table.other_type, v)) {
+                    visited.test_and_set(v.index()); // never allowed: don't look at it again
                     return;
                 }
-                if visited.test_and_set(v as usize) {
+                if visited.test_and_set(v.index()) {
                     out.push(v);
                 }
             });
@@ -214,14 +219,14 @@ fn pull_step(
     in_tables: &IndexVec<node_type::Id, Vec<TableRef>>,
     through: Option<&Through>,
     visited: &AtomicBitset,
-    frontier: &[u64],
-) -> (Vec<u64>, u64) {
+    frontier: &[GlobalId],
+) -> (Vec<GlobalId>, u64) {
     let n = visited.len();
     let mut current = Bitset::new(n);
     for &u in frontier {
-        current.set(u as usize);
+        current.set(u.index());
     }
-    let scan_word = |w: usize, out: &mut Vec<u64>, checked: &mut u64| {
+    let scan_word = |w: usize, out: &mut Vec<GlobalId>, checked: &mut u64| {
         let mut free = !visited.word(w);
         let end = n - w * 64;
         if end < 64 {
@@ -230,19 +235,21 @@ fn pull_step(
         while free != 0 {
             let i = w * 64 + free.trailing_zeros() as usize;
             free &= free - 1;
-            let tables = &in_tables[view.type_of(i as u64)];
-            if tables.is_empty() || view.is_deleted(i as u64) {
+            let g = GlobalId(i as u64);
+            let ty = view.type_of(g);
+            let tables = &in_tables[ty];
+            if tables.is_empty() || view.is_deleted(g) {
                 continue;
             }
             if let Some(t) = through {
-                if !t.allows(view, i as u64) {
+                if !t.allows(view, ty, g) {
                     continue;
                 }
             }
             for table in tables {
-                if view.any(table, i as u64, |u| current.get(u as usize), checked) {
+                if view.any(table, g, |u| current.get(u.index()), checked) {
                     if visited.test_and_set(i) {
-                        out.push(i as u64);
+                        out.push(g);
                     }
                     break;
                 }
@@ -283,8 +290,8 @@ fn pull_step(
 struct Scratch {
     forward: Vec<u32>,
     backward: Vec<u32>,
-    touched_forward: Vec<u64>,
-    touched_backward: Vec<u64>,
+    touched_forward: Vec<GlobalId>,
+    touched_backward: Vec<GlobalId>,
 }
 
 thread_local! {
@@ -297,8 +304,8 @@ const UNSEEN: u32 = u32::MAX;
 /// walking from both ends and always expanding the side whose current step is smaller.
 pub fn path_length(
     view: &View,
-    from: u64,
-    to: u64,
+    from: GlobalId,
+    to: GlobalId,
     link_types: &[link_type::Id],
     direction: Direction,
     max_steps: u32,
@@ -314,9 +321,9 @@ pub fn path_length(
             s.forward.resize(n, UNSEEN);
             s.backward.resize(n, UNSEEN);
         }
-        s.forward[from as usize] = 0;
+        s.forward[from.index()] = 0;
         s.touched_forward.push(from);
-        s.backward[to as usize] = 0;
+        s.backward[to.index()] = 0;
         s.touched_backward.push(to);
 
         let mut front_f = vec![from];
@@ -365,10 +372,10 @@ pub fn path_length(
             }
         }
         for &g in &s.touched_forward {
-            s.forward[g as usize] = UNSEEN;
+            s.forward[g.index()] = UNSEEN;
         }
         for &g in &s.touched_backward {
-            s.backward[g as usize] = UNSEEN;
+            s.backward[g.index()] = UNSEEN;
         }
         s.touched_forward.clear();
         s.touched_backward.clear();
@@ -381,25 +388,25 @@ fn expand(
     view: &View,
     tables: &IndexVec<node_type::Id, Vec<TableRef>>,
     through: Option<&Through>,
-    front: &[u64],
+    front: &[GlobalId],
     level: u32,
     mine: &mut [u32],
-    touched: &mut Vec<u64>,
+    touched: &mut Vec<GlobalId>,
     other: &[u32],
     best: &mut u32,
-    next: &mut Vec<u64>,
+    next: &mut Vec<GlobalId>,
 ) {
     for &u in front {
         for table in &tables[view.type_of(u)] {
             view.for_each(table, u, |v| {
-                let vi = v as usize;
+                let vi = v.index();
                 let theirs = other[vi];
                 if theirs != 0 && view.is_deleted(v) {
                     return;
                 }
                 if let Some(t) = through {
                     // The other side's own end is always allowed; any other node must meet the condition.
-                    if theirs != 0 && !t.allows(view, v) {
+                    if theirs != 0 && !t.allows(view, table.other_type, v) {
                         return;
                     }
                 }

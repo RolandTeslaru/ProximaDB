@@ -15,21 +15,20 @@ use proximadb::query::condition::{self, Condition, Op, Value};
 #[path = "shared/dataset.rs"]
 mod dataset;
 use dataset::{peak_rss_bytes, schema};
-use proximadb::core::node;
 use proximadb::query::walk::{self, Reach, Through};
 use rayon::ThreadPool;
+use proximadb::core::node::GlobalId;
 use serde_json::{Value as Json, json};
 
 const RUNS: usize = 3;
 
-fn global(graph: &Graph, record: &Json) -> u64 {
+fn global(graph: &Graph, record: &Json) -> GlobalId {
     let t = graph.node_type(record["label"].as_str().unwrap()).unwrap();
     let key = record["nodeId"].as_u64().unwrap().to_string();
     graph
         .key_index
-        .get(&graph.keys, &graph.nodes, t, key.as_bytes())
+        .get(&graph.keys, &graph.node_type_mappings, t, key.as_bytes())
         .expect("seed")
-        .0
 }
 
 /// One measured case: a group of starts, a function giving the answer for one start, and the expected answers.
@@ -139,13 +138,13 @@ fn main() {
     let status_active = Condition::compare("status", Op::Eq, Value::Str("active".into()));
 
     // ---- inputs ----
-    let general: Vec<(u64, bool)> = params["general"]
+    let general: Vec<(GlobalId, bool)> = params["general"]
         .as_array()
         .unwrap()
         .iter()
         .map(|r| (global(&graph, r), r["hub"].as_bool().unwrap()))
         .collect();
-    let followers: Vec<(u64, bool, String)> = params["followers"]
+    let followers: Vec<(GlobalId, bool, String)> = params["followers"]
         .as_array()
         .unwrap()
         .iter()
@@ -157,13 +156,13 @@ fn main() {
             )
         })
         .collect();
-    let pairs: Vec<(u64, u64)> = params["pairs"]
+    let pairs: Vec<(GlobalId, GlobalId)> = params["pairs"]
         .as_array()
         .unwrap()
         .iter()
         .map(|p| (global(&graph, &p["from"]), global(&graph, &p["to"])))
         .collect();
-    let long_pairs: Vec<(u64, u64, String)> = params["long_pairs"]
+    let long_pairs: Vec<(GlobalId, GlobalId, String)> = params["long_pairs"]
         .as_array()
         .unwrap()
         .iter()
@@ -175,7 +174,7 @@ fn main() {
             )
         })
         .collect();
-    let loops: Vec<(u64, String)> = params["loops"]
+    let loops: Vec<(GlobalId, String)> = params["loops"]
         .as_array()
         .unwrap()
         .iter()
@@ -183,7 +182,7 @@ fn main() {
         .collect();
 
     // ---- queries: answer for input i ----
-    let reach_count = |start: u64, direction: Direction, steps: u32| -> Json {
+    let reach_count = |start: GlobalId, direction: Direction, steps: u32| -> Json {
         let r = walk::reach(
             &view,
             &Reach {
@@ -197,11 +196,11 @@ fn main() {
         );
         json!((r.reached.len() as u64).min(10_000))
     };
-    let count_where = |reached: &[u64], allowed: &proximadb::Bitset| -> u64 {
+    let count_where = |reached: &[GlobalId], allowed: &proximadb::Bitset| -> u64 {
         reached
             .iter()
             .filter(|&&g| {
-                let (t, local) = graph.nodes.get(node::GlobalId(g));
+                let (t, local) = graph.node_type_mappings.get(g);
                 t == user && allowed.get(local.index())
             })
             .count() as u64
@@ -418,7 +417,7 @@ fn main() {
         user,
         &Condition::compare("banned", Op::Eq, Value::Bool(true)),
     );
-    let banned_starts: Vec<u64> = banned.ones().map(|l| l as u64).collect(); // users come first: local id = global id
+    let banned_starts: Vec<GlobalId> = banned.ones().map(|l| GlobalId(l as u64)).collect(); // users come first: local id = global id
     let histogram = |pool: &ThreadPool| {
         pool.install(|| {
             let t = Instant::now();

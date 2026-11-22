@@ -9,7 +9,7 @@ use crate::storage::property::Property;
 
 pub struct Graph {
     pub node_types: IndexVec<node_type::Id, node_type::Storage>,
-    pub nodes: node_type::Map,
+    pub node_type_mappings: node_type::Map,
     pub link_types: IndexVec<link_type::Id, link_type::Storage>,
     pub keys: PrimaryKeys,
     pub key_index: KeyIndex,
@@ -17,7 +17,7 @@ pub struct Graph {
 
 impl Graph {
     pub fn node_count(&self) -> usize {
-        self.nodes.len()
+        self.node_type_mappings.len()
     }
 
     pub fn node_type(&self, name: &str) -> Option<node_type::Id> {
@@ -62,7 +62,10 @@ impl Graph {
     /// Memory held by each part, in bytes.
     pub fn memory(&self) -> Vec<(String, usize)> {
         let mut out = vec![
-            ("node_type::Map".to_string(), self.nodes.bytes()),
+            (
+                "node_type::Map".to_string(),
+                self.node_type_mappings.bytes(),
+            ),
             ("primary keys".to_string(), self.keys.bytes()),
             ("key index".to_string(), self.key_index.bytes()),
         ];

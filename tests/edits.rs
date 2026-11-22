@@ -142,12 +142,12 @@ fn random_model(
     m
 }
 
-fn node(view: &View, t: &str, key: &str) -> Option<u64> {
+fn node(view: &View, t: &str, key: &str) -> Option<GlobalId> {
     view.lookup(view.graph.node_type(t).unwrap(), key.as_bytes())
 }
 
 /// Everything compared between the edited view and the rebuilt graph, for one start node, by keys.
-fn answers(view: &View, start: u64) -> Vec<BTreeSet<Vec<u8>>> {
+fn answers(view: &View, start: GlobalId) -> Vec<BTreeSet<Vec<u8>>> {
     let g = view.graph;
     let all = g.all_link_types();
     let person = g.node_type("Person").unwrap();
@@ -183,7 +183,7 @@ fn answers(view: &View, start: u64) -> Vec<BTreeSet<Vec<u8>>> {
     let mut over = BTreeSet::new();
     for local in older.ones() {
         // find the node with this local id
-        for g in 0..view.nodes {
+        for g in (0..view.nodes).map(GlobalId) {
             let (t, l) = view.get(g);
             if t == person && l.0 as usize == local && !view.is_deleted(g) {
                 over.insert(view.key(g));
@@ -282,8 +282,8 @@ fn random_edits_match_a_rebuild() {
                         let (a, b) = (pick(&mut rng), pick(&mut rng));
                         w.add_link(
                             follows,
-                            GlobalId(node(&view, "Person", &a).unwrap()),
-                            GlobalId(node(&view, "Person", &b).unwrap()),
+                            node(&view, "Person", &a).unwrap(),
+                            node(&view, "Person", &b).unwrap(),
                         );
                         model.follows.push((a, b));
                     }
@@ -292,8 +292,8 @@ fn random_edits_match_a_rebuild() {
                         let (a, b) = (pick(&mut rng), things[rng.below(things.len())].clone());
                         w.add_link(
                             owns,
-                            GlobalId(node(&view, "Person", &a).unwrap()),
-                            GlobalId(node(&view, "Thing", &b).unwrap()),
+                            node(&view, "Person", &a).unwrap(),
+                            node(&view, "Thing", &b).unwrap(),
                         );
                         model.owns.push((a, b));
                     }
@@ -304,8 +304,8 @@ fn random_edits_match_a_rebuild() {
                             if !deleted.contains(&a) && !deleted.contains(&b) {
                                 assert!(w.remove_link(
                                     follows,
-                                    GlobalId(node(&view, "Person", &a).unwrap()),
-                                    GlobalId(node(&view, "Person", &b).unwrap())
+                                    node(&view, "Person", &a).unwrap(),
+                                    node(&view, "Person", &b).unwrap()
                                 ));
                                 model.follows.remove(i);
                             }
@@ -315,7 +315,7 @@ fn random_edits_match_a_rebuild() {
                         let a = pick(&mut rng);
                         let status = ["active", "inactive"][rng.below(2)].to_string();
                         let age = 18 + rng.below(60) as i64;
-                        let g = GlobalId(node(&view, "Person", &a).unwrap());
+                        let g = node(&view, "Person", &a).unwrap();
                         w.set_property(g, "status", &Value::Str(status.clone()));
                         w.set_property(g, "age", &Value::Num(age as f64));
                         model.persons.insert(a, (status, age));
@@ -323,7 +323,7 @@ fn random_edits_match_a_rebuild() {
                     _ => {
                         if alive.len() > 40 {
                             let a = pick(&mut rng);
-                            w.delete_node(GlobalId(node(&view, "Person", &a).unwrap()));
+                            w.delete_node(node(&view, "Person", &a).unwrap());
                             deleted.insert(a);
                         }
                     }
@@ -389,7 +389,7 @@ fn a_search_never_sees_half_an_action() {
     let b = node(&before, "Person", "p1").unwrap();
     let mut w = store.writer();
     w.begin(1);
-    w.add_link(follows, GlobalId(a), GlobalId(b));
+    w.add_link(follows, a, b);
     // Written but not published: no view sees it, forward or backward.
     let g1 = store.current();
     let during = g1.view();
@@ -420,7 +420,7 @@ fn a_search_never_sees_half_an_action() {
     // A property change is only visible to views after its commit.
     let cond = Condition::compare("status", Op::Eq, Value::Str("vip".into()));
     w.begin(2);
-    w.set_property(GlobalId(a), "status", &Value::Str("vip".into()));
+    w.set_property(a, "status", &Value::Str("vip".into()));
     assert_eq!(
         condition::evaluate(&store.current().view(), person, &cond).count(),
         0
@@ -480,7 +480,7 @@ fn an_idle_writer_still_rebuilds() {
     };
     for seq in 1..=6 {
         w.begin(seq);
-        w.add_link(follows, GlobalId(a), GlobalId(b));
+        w.add_link(follows, a, b);
         w.commit();
     }
     assert!(w.is_rebuilding(), "the last action started a rebuild");

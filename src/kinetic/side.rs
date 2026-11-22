@@ -11,6 +11,7 @@ use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use crate::collections::blocks::AtomicBlocks;
+use crate::core::{link, node};
 
 pub const NONE: u64 = u64::MAX;
 pub const CHUNK: usize = 8;
@@ -20,8 +21,8 @@ const POOL_MAX_BLOCKS: usize = 1 << 14; // about 67 M chunks, 537 M entries
 
 #[derive(Clone, Copy)]
 pub struct Entry {
-    pub target: u64,
-    pub link: u64,
+    pub target: node::GlobalId,
+    pub link: link::Id,
     pub seq: u64,
 }
 
@@ -90,14 +91,14 @@ impl SideTable {
     }
 
     /// Writer only: adds an entry to `node`'s chain. `tail` is the writer's own record of the node's last chunk.
-    pub fn push(&self, node: u64, entry: Entry, tail: &mut Option<u64>) {
+    pub fn push(&self, node: node::GlobalId, entry: Entry, tail: &mut Option<u64>) {
         let last = match *tail {
             Some(c) if (self.chunk(c).count.load(Ordering::Relaxed) as usize) < CHUNK => c,
             previous => {
                 let c = self.alloc();
                 match previous {
                     Some(p) => self.chunk(p).next.store(c, Ordering::Release),
-                    None => self.heads.store(node, c),
+                    None => self.heads.store(node.0, c),
                 }
                 *tail = Some(c);
                 c
@@ -111,8 +112,8 @@ impl SideTable {
     }
 
     /// Writer only: marks the first live entry of `node` pointing to `target` as removed by action `seq`.
-    pub fn remove(&self, node: u64, target: u64, seq: u64) -> Option<u64> {
-        let mut c = self.heads.load(node);
+    pub fn remove(&self, node: node::GlobalId, target: node::GlobalId, seq: u64) -> Option<link::Id> {
+        let mut c = self.heads.load(node.0);
         while c != NONE {
             let chunk = self.chunk(c);
             let n = chunk.count.load(Ordering::Acquire) as usize;
@@ -131,8 +132,8 @@ impl SideTable {
 
     /// Calls `f(target, link)` for every entry of `node` added at or before `upto` and not removed by then.
     #[inline]
-    pub fn for_each(&self, node: u64, upto: u64, mut f: impl FnMut(u64, u64)) {
-        let mut c = self.heads.load(node);
+    pub fn for_each(&self, node: node::GlobalId, upto: u64, mut f: impl FnMut(node::GlobalId, link::Id)) {
+        let mut c = self.heads.load(node.0);
         while c != NONE {
             let chunk = self.chunk(c);
             let n = chunk.count.load(Ordering::Acquire) as usize;
@@ -148,8 +149,8 @@ impl SideTable {
     }
 
     #[inline]
-    pub fn has_any(&self, node: u64) -> bool {
-        self.heads.load(node) != NONE
+    pub fn has_any(&self, node: node::GlobalId) -> bool {
+        self.heads.load(node.0) != NONE
     }
 
     pub fn chunks(&self) -> u64 {

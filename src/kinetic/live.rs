@@ -32,12 +32,12 @@ pub(crate) const FORWARD: usize = 0;
 /// Index of the "followed by" table.
 pub(crate) const BACKWARD: usize = 1;
 
-pub(crate) const POSITION_BITS: u32 = 48;
+pub(crate) const POSITION_BITS: u32 = 32;
 pub(crate) const POSITION_MASK: u64 = (1 << POSITION_BITS) - 1;
 
 #[derive(Default)]
 pub(crate) struct NewKeys {
-    pub(crate) by_key: FxHashMap<(u16, Vec<u8>), (u64, u64)>,
+    pub(crate) by_key: FxHashMap<(u16, Vec<u8>), (node::GlobalId, u64)>,
     pub(crate) by_node: Vec<Vec<u8>>,
 }
 
@@ -172,11 +172,31 @@ impl Live {
     }
 }
 
-/// One link type table as a walk reads it: packed part, side store, and removed bits.
+/// One link type table as a walk reads it: packed part, side store, and removed bits. The packed part is in
+/// positions within node types; `row_first` and `other_first` turn them back into global numbers.
 pub struct TableRef<'a> {
     pub base: &'a Table,
     pub side: &'a SideTable,
     pub removed: &'a AtomicBitset,
+    /// Global number of the first node of the type the rows are for.
+    pub row_first: u64,
+    /// Global number of the first node of the type `points_to` holds.
+    pub other_first: u64,
+    /// The type of every node this table leads to (packed and side store alike).
+    pub other_type: node_type::Id,
+}
+
+impl TableRef<'_> {
+    /// The row of packed node `u` (a node of the table's row type).
+    #[inline]
+    fn row(&self, u: node::GlobalId) -> node::Id {
+        node::Id((u.0 - self.row_first) as u32)
+    }
+
+    #[inline]
+    fn global(&self, v: node::Id) -> node::GlobalId {
+        node::GlobalId(self.other_first + v.0 as u64)
+    }
 }
 
 /// What a search sees: everything published up to `upto`.
@@ -195,34 +215,44 @@ impl<'a> View<'a> {
     }
 
     #[inline]
-    pub fn get(&self, g: u64) -> (node_type::Id, node::Id) {
-        if g < self.live.base_nodes {
-            self.graph.nodes.get(node::GlobalId(g))
+    pub fn get(&self, g: node::GlobalId) -> (node_type::Id, node::Id) {
+        if g.0 < self.live.base_nodes {
+            self.graph.node_type_mappings.get(g)
         } else {
             let e = self
                 .live
                 .new_map
-                .get(g - self.live.base_nodes)
+                .get(g.0 - self.live.base_nodes)
                 .expect("node");
             (
                 node_type::Id((e >> POSITION_BITS) as u16),
-                node::Id(e & POSITION_MASK),
+                node::Id((e & POSITION_MASK) as _),
             )
         }
     }
 
+    /// Position within `t` of node `g`, which must be of type `t`. No type search for packed nodes.
     #[inline]
-    pub fn type_of(&self, g: u64) -> node_type::Id {
-        if g < self.live.base_nodes {
-            self.graph.nodes.type_of(node::GlobalId(g))
+    pub fn position(&self, t: node_type::Id, g: node::GlobalId) -> node::Id {
+        if g.0 < self.live.base_nodes {
+            self.graph.node_type_mappings.position(t, g)
+        } else {
+            self.get(g).1
+        }
+    }
+
+    #[inline]
+    pub fn type_of(&self, g: node::GlobalId) -> node_type::Id {
+        if g.0 < self.live.base_nodes {
+            self.graph.node_type_mappings.type_of(g)
         } else {
             self.get(g).0
         }
     }
 
     #[inline]
-    pub fn is_deleted(&self, g: u64) -> bool {
-        self.any_deleted && self.live.deleted.get(g)
+    pub fn is_deleted(&self, g: node::GlobalId) -> bool {
+        self.any_deleted && self.live.deleted.get(g.0)
     }
 
     /// For each node type, the tables a walk reads from a node of that type.
@@ -234,11 +264,16 @@ impl<'a> View<'a> {
         let mut out = IndexVec::from_fn(self.graph.node_types.len(), |_| Vec::new());
         for &r in link_types {
             let rel = &self.graph.link_types[r];
+            let map = &self.graph.node_type_mappings;
+            let (from_first, to_first) = (map.first(rel.from_type).0, map.first(rel.to_type).0);
             if matches!(direction, Direction::Forward | Direction::Both) {
                 out[rel.from_type].push(TableRef {
                     base: &rel.forward,
                     side: &self.live.side[r][FORWARD],
                     removed: &self.live.removed[r][FORWARD],
+                    row_first: from_first,
+                    other_first: to_first,
+                    other_type: rel.to_type,
                 });
             }
             if matches!(direction, Direction::Backward | Direction::Both) {
@@ -246,6 +281,9 @@ impl<'a> View<'a> {
                     base: &rel.backward,
                     side: &self.live.side[r][BACKWARD],
                     removed: &self.live.removed[r][BACKWARD],
+                    row_first: to_first,
+                    other_first: from_first,
+                    other_type: rel.from_type,
                 });
             }
         }
@@ -253,25 +291,24 @@ impl<'a> View<'a> {
     }
 
     #[inline]
-    fn changed(&self, u: u64) -> bool {
-        self.any_changes && self.live.changed.get(u)
+    fn changed(&self, u: node::GlobalId) -> bool {
+        self.any_changes && self.live.changed.get(u.0)
     }
 
     /// Calls `f(v)` for every node `u` connects to in this table, as of this view.
     #[inline]
-    pub fn for_each(&self, t: &TableRef, u: u64, mut f: impl FnMut(u64)) {
+    pub fn for_each(&self, t: &TableRef, u: node::GlobalId, mut f: impl FnMut(node::GlobalId)) {
         let changed = self.changed(u);
-        if u < self.live.base_nodes {
-            let from = t.base.starts[u as usize] as usize;
-            let to = t.base.starts[u as usize + 1] as usize;
+        if u.0 < self.live.base_nodes {
+            let range = t.base.range(t.row(u));
             if !changed {
-                for &v in &t.base.points_to[from..to] {
-                    f(v);
+                for &v in &t.base.points_to[range] {
+                    f(t.global(v));
                 }
             } else {
-                for p in from..to {
+                for p in range {
                     if !t.removed.get(p) {
-                        f(t.base.points_to[p]);
+                        f(t.global(t.base.points_to[p]));
                     }
                 }
             }
@@ -286,17 +323,15 @@ impl<'a> View<'a> {
     pub fn any(
         &self,
         t: &TableRef,
-        u: u64,
-        mut test: impl FnMut(u64) -> bool,
+        u: node::GlobalId,
+        mut test: impl FnMut(node::GlobalId) -> bool,
         checked: &mut u64,
     ) -> bool {
         let changed = self.changed(u);
-        if u < self.live.base_nodes {
-            let from = t.base.starts[u as usize] as usize;
-            let to = t.base.starts[u as usize + 1] as usize;
-            for p in from..to {
+        if u.0 < self.live.base_nodes {
+            for p in t.base.range(t.row(u)) {
                 *checked += 1;
-                if (!changed || !t.removed.get(p)) && test(t.base.points_to[p]) {
+                if (!changed || !t.removed.get(p)) && test(t.global(t.base.points_to[p])) {
                     return true;
                 }
             }
@@ -315,22 +350,22 @@ impl<'a> View<'a> {
     }
 
     #[inline]
-    pub fn degree(&self, t: &TableRef, u: u64) -> u64 {
-        if u < self.live.base_nodes {
-            t.base.degree(u as usize)
+    pub fn degree(&self, t: &TableRef, u: node::GlobalId) -> u64 {
+        if u.0 < self.live.base_nodes {
+            t.base.degree(t.row(u))
         } else {
             0
         }
     }
 
     /// (type, key) → node, including nodes added since the rebuild.
-    pub fn lookup(&self, t: node_type::Id, key: &[u8]) -> Option<u64> {
-        if let Some(g) = self
-            .graph
-            .key_index
-            .get(&self.graph.keys, &self.graph.nodes, t, key)
+    pub fn lookup(&self, t: node_type::Id, key: &[u8]) -> Option<node::GlobalId> {
+        if let Some(g) =
+            self.graph
+                .key_index
+                .get(&self.graph.keys, &self.graph.node_type_mappings, t, key)
         {
-            return (!self.is_deleted(g.0)).then_some(g.0);
+            return (!self.is_deleted(g)).then_some(g);
         }
         let keys = self.live.new_keys.read().unwrap();
         keys.by_key
@@ -341,17 +376,17 @@ impl<'a> View<'a> {
     }
 
     /// A node's primary key.
-    pub fn key(&self, g: u64) -> Vec<u8> {
-        if g < self.live.base_nodes {
-            self.graph.keys.get(node::GlobalId(g)).to_vec()
+    pub fn key(&self, g: node::GlobalId) -> Vec<u8> {
+        if g.0 < self.live.base_nodes {
+            self.graph.keys.get(g).to_vec()
         } else {
-            self.live.new_keys.read().unwrap().by_node[(g - self.live.base_nodes) as usize].clone()
+            self.live.new_keys.read().unwrap().by_node[(g.0 - self.live.base_nodes) as usize].clone()
         }
     }
 
     /// How many nodes of type `t` this view sees (packed ones plus those added up to `upto`).
     pub fn count(&self, t: node_type::Id) -> u64 {
-        let base = self.graph.nodes.count(t);
+        let base = self.graph.node_type_mappings.count(t);
         let added = &self.live.new_by_type[t];
         let mut n = added.len();
         while n > 0 && added.get(n - 1).unwrap() > self.upto {

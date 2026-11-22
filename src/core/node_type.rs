@@ -3,6 +3,7 @@
 use crate::collections::Idx;
 
 /// A node type's number (up to 65,536 types).
+#[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Id(pub u16);
 

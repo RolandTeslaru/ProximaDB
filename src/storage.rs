@@ -4,6 +4,7 @@ pub mod graph;
 pub mod keys;
 pub mod link_type;
 pub mod node_type;
+pub mod order;
 pub mod property;
 
 pub use graph::Graph;

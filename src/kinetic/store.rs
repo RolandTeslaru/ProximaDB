@@ -135,7 +135,7 @@ struct CaughtUp {
 struct Replay {
     editor: Editor,
     /// Old node number → new one (or `NONE`); grows as replayed actions add nodes.
-    remap: Vec<u64>,
+    remap: Vec<node::GlobalId>,
     /// The new generation's journal: the replayed actions with new node numbers.
     journal: Vec<(u64, Op)>,
     link_edits: u64,
@@ -157,12 +157,12 @@ impl Replay {
                 self.actions += 1;
             }
             let remap = &self.remap;
-            let new = |g: u64| remap.get(g as usize).copied().filter(|&n| n != NONE);
+            let new = |g: node::GlobalId| remap.get(g.index()).copied().filter(|&n| n != NONE);
             let editor = &mut self.editor;
             match op {
                 Op::AddNode { t, key } => {
                     let g = editor.add_node(t, &key);
-                    self.remap.push(g.0);
+                    self.remap.push(g);
                     self.journal.push((seq, Op::AddNode { t, key }));
                     self.node_edits += 1;
                 }
@@ -172,7 +172,7 @@ impl Replay {
                     value,
                 } => {
                     if let Some(n) = new(node) {
-                        editor.set_property(node::GlobalId(n), property, &value);
+                        editor.set_property(n, property, &value);
                         self.journal.push((
                             seq,
                             Op::SetProperty {
@@ -186,21 +186,21 @@ impl Replay {
                 }
                 Op::DeleteNode { node } => {
                     if let Some(n) = new(node) {
-                        editor.delete_node(node::GlobalId(n));
+                        editor.delete_node(n);
                         self.journal.push((seq, Op::DeleteNode { node: n }));
                         self.node_edits += 1;
                     }
                 }
                 Op::AddLink { r, from, to } => {
                     if let (Some(a), Some(c)) = (new(from), new(to)) {
-                        editor.add_link(r, node::GlobalId(a), node::GlobalId(c));
+                        editor.add_link(r, a, c);
                         self.journal.push((seq, Op::AddLink { r, from: a, to: c }));
                         self.link_edits += 1;
                     }
                 }
                 Op::RemoveLink { r, from, to } => {
                     if let (Some(a), Some(c)) = (new(from), new(to)) {
-                        if editor.remove_link(r, node::GlobalId(a), node::GlobalId(c)) {
+                        if editor.remove_link(r, a, c) {
                             self.journal
                                 .push((seq, Op::RemoveLink { r, from: a, to: c }));
                             self.link_edits += 1;
@@ -326,14 +326,14 @@ impl Writer<'_> {
     }
 
     pub fn set_property(&mut self, g: node::GlobalId, name: &str, value: &Value) {
-        let (t, _) = self.s.editor.get(g.0);
+        let (t, _) = self.s.editor.get(g);
         let property = self.s.editor.property_index(t, name);
         self.s.editor.set_property(g, property, value);
         let seq = self.seq();
         self.record(
             seq,
             Op::SetProperty {
-                node: g.0,
+                node: g,
                 property,
                 value: value.clone(),
             },
@@ -344,7 +344,7 @@ impl Writer<'_> {
     pub fn delete_node(&mut self, g: node::GlobalId) {
         self.s.editor.delete_node(g);
         let seq = self.seq();
-        self.record(seq, Op::DeleteNode { node: g.0 });
+        self.record(seq, Op::DeleteNode { node: g });
         self.s.node_edits += 1;
     }
 
@@ -360,8 +360,8 @@ impl Writer<'_> {
             seq,
             Op::AddLink {
                 r,
-                from: from.0,
-                to: to.0,
+                from,
+                to,
             },
         );
         self.s.link_edits += 1;
@@ -382,8 +382,8 @@ impl Writer<'_> {
                 seq,
                 Op::RemoveLink {
                     r,
-                    from: from.0,
-                    to: to.0,
+                    from,
+                    to,
                 },
             );
             self.s.link_edits += 1;

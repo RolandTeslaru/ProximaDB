@@ -12,20 +12,20 @@ use proximadb::core::Direction;
 use proximadb::load;
 use proximadb::query::condition::{self, Condition, Op, Value};
 use proximadb::query::walk::{self, Reach, ReachResult, Through};
+use proximadb::core::node::GlobalId;
 use serde_json::Value as Json;
 
 #[path = "shared/dataset.rs"]
 mod dataset;
 use dataset::schema;
 
-fn global(graph: &Graph, record: &Json) -> u64 {
+fn global(graph: &Graph, record: &Json) -> GlobalId {
     let t = graph.node_type(record["label"].as_str().unwrap()).unwrap();
     let key = record["nodeId"].as_u64().unwrap().to_string();
     graph
         .key_index
-        .get(&graph.keys, &graph.nodes, t, key.as_bytes())
+        .get(&graph.keys, &graph.node_type_mappings, t, key.as_bytes())
         .unwrap()
-        .0
 }
 
 fn pool(threads: usize) -> rayon::ThreadPool {
@@ -48,9 +48,9 @@ impl Work {
     }
 }
 
-/// Estimated random 64-byte lines read from memory: for each node expanded, its type entry, its "starts at" entries
-/// and the start of its part of "points to" (3); with a path filter, each connection checked also reads the type
-/// entry of the node found (1).
+/// Estimated random 64-byte lines read from memory: for each node expanded, its type, its "starts at" entries and the
+/// start of its part of "points to" (3); with a path filter, each connection checked also reads the filter bit of the
+/// node found (1). The node found's type comes from the link type, so it costs no read.
 fn lines(w: Work, filtered: bool) -> f64 {
     3.0 * w.reached as f64 + if filtered { w.scanned as f64 } else { 0.0 }
 }
@@ -62,7 +62,7 @@ fn main() {
     let view = live.view(&graph);
     let params: Json =
         serde_json::from_str(&std::fs::read_to_string(dir.join("params.json")).unwrap()).unwrap();
-    let starts: Vec<u64> = params["followers"]
+    let starts: Vec<GlobalId> = params["followers"]
         .as_array()
         .unwrap()
         .iter()
@@ -85,7 +85,7 @@ fn main() {
         user,
         &Condition::compare("banned", Op::Eq, Value::Bool(true)),
     );
-    let banned_starts: Vec<u64> = banned.ones().map(|l| l as u64).collect();
+    let banned_starts: Vec<GlobalId> = banned.ones().map(|l| GlobalId(l as u64)).collect();
 
     let max_threads = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -95,7 +95,7 @@ fn main() {
         counts.push(max_threads);
     }
 
-    let walk4 = |s: u64, filtered: bool| {
+    let walk4 = |s: GlobalId, filtered: bool| {
         walk::reach(
             &view,
             &Reach {

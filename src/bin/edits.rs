@@ -56,7 +56,7 @@ fn split(
     user: node_type::Id,
     follows: link_type::Id,
     active: &Condition,
-    starts: &[u64],
+    starts: &[GlobalId],
 ) -> (f64, f64) {
     let t = Instant::now();
     let mut through = Through::new(view.graph, false);
@@ -94,7 +94,7 @@ fn main() {
         serde_json::from_str(&std::fs::read_to_string(dir.join("params.json")).unwrap()).unwrap();
     let user = graph.node_type("User").unwrap();
     let follows = graph.link_type("FOLLOWS").unwrap();
-    let users = graph.nodes.count(user); // users come first: their numbers are 0..users, before and after rebuilds
+    let users = graph.node_type_mappings.count(user); // users come first: their numbers are 0..users, before and after rebuilds
     let packed_links: usize = graph.link_types.iter().map(|r| r.forward.len()).sum();
     let packed_nodes = graph.node_count();
     // Ordinary (non-hub) start users, by key, so they can be found again in any generation.
@@ -105,7 +105,7 @@ fn main() {
         .filter(|r| !r["hub"].as_bool().unwrap())
         .map(|r| r["nodeId"].as_u64().unwrap().to_string().into_bytes())
         .collect();
-    let starts_in = |view: &View| -> Vec<u64> {
+    let starts_in = |view: &View| -> Vec<GlobalId> {
         start_keys
             .iter()
             .map(|k| view.lookup(user, k).unwrap())

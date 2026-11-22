@@ -49,7 +49,7 @@ impl Condition {
 
 /// The yes/no list of `condition` for every node of type `t`, indexed by `node::Id`. Missing values never match.
 pub fn evaluate_packed(graph: &Graph, t: node_type::Id, condition: &Condition) -> Bitset {
-    let n = graph.nodes.count(t) as usize;
+    let n = graph.node_type_mappings.count(t) as usize;
     match condition {
         Condition::Compare {
             property,
@@ -288,7 +288,7 @@ fn properties_in(c: &Condition, out: &mut Vec<String>) {
 pub fn evaluate(view: &View, t: node_type::Id, cond: &Condition) -> Bitset {
     let graph = view.graph;
     let mut out = evaluate_packed(graph, t, cond);
-    let base = graph.nodes.count(t);
+    let base = graph.node_type_mappings.count(t);
     let total = view.count(t);
     for _ in base..total {
         out.push(false);

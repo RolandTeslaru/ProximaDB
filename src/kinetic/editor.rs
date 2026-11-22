@@ -24,7 +24,8 @@ pub struct Editor {
     /// Per link type and side, the writer's record of each node's last side-store chunk.
     tails: IndexVec<link_type::Id, [FxHashMap<u64, u64>; 2]>,
     counts: IndexVec<node_type::Id, u64>,
-    next_link: u64,
+    /// Per link type, the number the next added link gets.
+    next_link: IndexVec<link_type::Id, u32>,
     nodes: u64,
 }
 
@@ -39,8 +40,8 @@ impl Editor {
             next_link: graph
                 .link_types
                 .iter()
-                .map(|r| r.forward.len() as u64)
-                .sum(),
+                .map(|r| r.forward.len() as u32)
+                .collect(),
             nodes: view.nodes,
             generation,
         }
@@ -74,19 +75,19 @@ impl Editor {
             .store(self.seq, Ordering::Release);
     }
 
-    pub fn get(&self, g: u64) -> (node_type::Id, node::Id) {
-        if g < self.generation.live.base_nodes {
-            self.generation.graph.nodes.get(node::GlobalId(g))
+    pub fn get(&self, g: node::GlobalId) -> (node_type::Id, node::Id) {
+        if g.0 < self.generation.live.base_nodes {
+            self.generation.graph.node_type_mappings.get(g)
         } else {
             let e = self
                 .generation
                 .live
                 .new_map
-                .get(g - self.generation.live.base_nodes)
+                .get(g.0 - self.generation.live.base_nodes)
                 .expect("node");
             (
                 node_type::Id((e >> POSITION_BITS) as u16),
-                node::Id(e & POSITION_MASK),
+                node::Id((e & POSITION_MASK) as _),
             )
         }
     }
@@ -101,7 +102,8 @@ impl Editor {
             .push(((t.0 as u64) << POSITION_BITS) | local);
         self.generation.live.new_by_type[t].push(self.seq);
         let mut keys = self.generation.live.new_keys.write().unwrap();
-        keys.by_key.insert((t.0, key.to_vec()), (g, self.seq));
+        keys.by_key
+            .insert((t.0, key.to_vec()), (node::GlobalId(g), self.seq));
         keys.by_node.push(key.to_vec());
         self.nodes += 1;
         node::GlobalId(g)
@@ -113,12 +115,12 @@ impl Editor {
     }
 
     pub fn set_property(&mut self, g: node::GlobalId, pi: usize, value: &Value) {
-        let (t, local) = self.get(g.0);
+        let (t, local) = self.get(g);
         let p = &self.generation.graph.node_types[t].properties[pi];
         let log = &self.generation.live.props[t][pi];
         let raw = encode(p, log, value);
         log.log.push(Change {
-            local: local.0,
+            local: local.0 as u64,
             value: raw,
             seq: self.seq,
         });
@@ -132,8 +134,8 @@ impl Editor {
             .store(true, Ordering::Release);
     }
 
-    fn mark_changed(&self, g: u64) {
-        self.generation.live.changed.set(g);
+    fn mark_changed(&self, g: node::GlobalId) {
+        self.generation.live.changed.set(g.0);
         self.generation
             .live
             .any_changes
@@ -146,11 +148,19 @@ impl Editor {
         from: node::GlobalId,
         to: node::GlobalId,
     ) -> link::Id {
-        let link = self.next_link;
-        self.next_link += 1;
-        for (side, node, other) in [(FORWARD, from.0, to.0), (BACKWARD, to.0, from.0)] {
+        let rel = &self.generation.graph.link_types[r];
+        assert!(
+            self.get(from).0 == rel.from_type && self.get(to).0 == rel.to_type,
+            "link {} joins {:?} to {:?} nodes",
+            rel.name,
+            rel.from_type,
+            rel.to_type
+        );
+        let link = link::Id(self.next_link[r]);
+        self.next_link[r] += 1;
+        for (side, node, other) in [(FORWARD, from, to), (BACKWARD, to, from)] {
             self.mark_changed(node);
-            let tail = self.tails[r][side].get(&node).copied();
+            let tail = self.tails[r][side].get(&node.0).copied();
             let mut t = tail;
             self.generation.live.side[r][side].push(
                 node,
@@ -162,10 +172,10 @@ impl Editor {
                 &mut t,
             );
             if let Some(c) = t {
-                self.tails[r][side].insert(node, c);
+                self.tails[r][side].insert(node.0, c);
             }
         }
-        link::Id(link)
+        link
     }
 
     /// Removes one link `from → to` of link type `r`; false if there is none.
@@ -175,20 +185,24 @@ impl Editor {
         from: node::GlobalId,
         to: node::GlobalId,
     ) -> bool {
-        let rel = &self.generation.graph.link_types[r];
+        let graph = &self.generation.graph;
+        let base_nodes = self.generation.live.base_nodes;
+        let rel = &graph.link_types[r];
+        if self.get(from).0 != rel.from_type || self.get(to).0 != rel.to_type {
+            return false;
+        }
         let mut found = false;
         for (side, base, node, other) in [
-            (FORWARD, &rel.forward, from.0, to.0),
-            (BACKWARD, &rel.backward, to.0, from.0),
+            (FORWARD, &rel.forward, from, to),
+            (BACKWARD, &rel.backward, to, from),
         ] {
             let mut done = false;
-            if node < self.generation.live.base_nodes {
-                let (a, b) = (
-                    base.starts[node as usize] as usize,
-                    base.starts[node as usize + 1] as usize,
-                );
-                for p in a..b {
-                    if base.points_to[p] == other
+            // Packed links join packed nodes only.
+            if node.0 < base_nodes && other.0 < base_nodes {
+                let row = graph.node_type_mappings.get(node).1;
+                let target = graph.node_type_mappings.get(other).1;
+                for p in base.range(row) {
+                    if base.points_to[p] == target
                         && self.generation.live.removed[r][side].test_and_set(p)
                     {
                         done = true;
