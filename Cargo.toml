@@ -16,6 +16,10 @@ axum = { version = "0.8", optional = true }
 mimalloc = { version = "0.1", optional = true, default-features = false }
 serde = { version = "1", features = ["derive"], optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync"], optional = true }
+parquet = { version = "60.2.0", default-features = false, features = ["arrow", "snap", "zstd", "lz4"] }
+arrow-array = "60.2.0"
+arrow-cast = "60.2.0"
+arrow-schema = "60.2.0"
 
 [features]
 server = ["dep:axum", "dep:mimalloc", "dep:serde", "dep:tokio"]

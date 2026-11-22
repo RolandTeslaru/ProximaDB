@@ -1,10 +1,21 @@
-//! The schema file: node types with their properties and source files, link types with their join files.
+//! The schema file: node types with their properties and datasets, link types with where their pairs come from.
+//!
+//! A link type has sides `a` (`from_type`) and `b` (`to_type`) and one of Quarry's three backings:
 //!
 //! ```json
 //! {
-//!   "node_types": [{"name": "User", "file": "users.csv", "primary_key": "id", "properties": {"status": "string"}}],
-//!   "link_types": [{"name": "FOLLOWS", "from_type": "User", "to_type": "User", "file": "follows.csv",
-//!                   "from_column": "src", "to_column": "dst"}]
+//!   "node_types": [
+//!     {"name": "Operative", "file": "operatives.parquet", "primary_key": "id",
+//!      "properties": {"status": "string", "joined": "date"}}
+//!   ],
+//!   "link_types": [
+//!     {"name": "FOLLOWS", "from_type": "User", "to_type": "User",
+//!      "backing": {"dataset": {"file": "follows.parquet", "a": "src", "b": "dst"}}},
+//!     {"name": "WORKS_AT", "from_type": "Operative", "to_type": "Station",
+//!      "backing": {"foreign_key": {"side": "a", "property": "stationId"}}},
+//!     {"name": "LOADOUT", "from_type": "Operative", "to_type": "Equipment",
+//!      "backing": {"object": {"type": "Assignment", "a": "operativeId", "b": "equipmentId"}}}
+//!   ]
 //! }
 //! ```
 
@@ -14,7 +25,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use proximadb::core::Kind;
-use proximadb::load::{LinkTypeSpec, NodeTypeSpec, Schema};
+use proximadb::load::{Backing, LinkTypeSpec, NodeTypeSpec, Schema, Side};
 
 
 #[derive(Deserialize)]
@@ -38,9 +49,34 @@ struct LinkTypeFile {
     name: String,
     from_type: String,
     to_type: String,
-    file: String,
-    from_column: String,
-    to_column: String,
+    backing: BackingFile,
+}
+
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BackingFile {
+    /// A join dataset with one key column per side.
+    Dataset { file: String, a: String, b: String },
+
+    /// A property on side `a`'s or `b`'s object type holding the other side's key.
+    ForeignKey { side: SideFile, property: String },
+
+    /// An intermediary object type with one key property per side.
+    Object {
+        #[serde(rename = "type")]
+        node_type: String,
+        a: String,
+        b: String,
+    },
+}
+
+
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+enum SideFile {
+    A,
+    B,
 }
 
 
@@ -67,6 +103,33 @@ impl From<KindFile> for Kind {
             KindFile::Boolean => Kind::Boolean,
             KindFile::Date => Kind::Date,
             KindFile::Timestamp => Kind::Timestamp,
+        }
+    }
+}
+
+
+impl From<BackingFile> for Backing {
+    fn from(backing: BackingFile) -> Self {
+        match backing {
+            BackingFile::Dataset { file, a, b } => Backing::Dataset {
+                file,
+                from_column: a,
+                to_column: b,
+            },
+
+            BackingFile::ForeignKey { side, property } => Backing::ForeignKey {
+                side: match side {
+                    SideFile::A => Side::From,
+                    SideFile::B => Side::To,
+                },
+                property,
+            },
+
+            BackingFile::Object { node_type, a, b } => Backing::Object {
+                node_type,
+                from_property: a,
+                to_property: b,
+            },
         }
     }
 }
@@ -99,9 +162,7 @@ pub(crate) fn schema_from(path: &Path) -> Result<Schema, String> {
             name: link_type.name,
             from_type: link_type.from_type,
             to_type: link_type.to_type,
-            file: link_type.file,
-            from_column: link_type.from_column,
-            to_column: link_type.to_column,
+            backing: link_type.backing.into(),
         })
         .collect();
 

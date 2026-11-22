@@ -178,7 +178,7 @@ pub fn parse_date(s: &str) -> Option<i32> {
     Some(days_from_civil(y, m, d) as i32)
 }
 
-fn parse_timestamp(s: &str) -> Option<i64> {
+pub(crate) fn parse_timestamp(s: &str) -> Option<i64> {
     let days = parse_date(s)? as i64;
     let time = s.get(11..19).unwrap_or("00:00:00");
     let mut t = time.split(':').map(|p| p.parse::<i64>().unwrap_or(0));

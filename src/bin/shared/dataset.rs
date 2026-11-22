@@ -1,13 +1,20 @@
 //! The social-network test dataset's schema, shared by the measurement binaries.
 
 use proximadb::core::Kind;
-use proximadb::load::{LinkTypeSpec, NodeTypeSpec, Schema};
+use proximadb::load::{Backing, LinkTypeSpec, NodeTypeSpec, Schema};
 
+/// The dataset's CSV files.
+#[allow(dead_code)]
 pub fn schema() -> Schema {
+    schema_for("csv")
+}
+
+/// The dataset's files with extension `format`: `csv` or `parquet` (the generator writes both).
+pub fn schema_for(format: &str) -> Schema {
     let props = |list: &[(&str, Kind)]| list.iter().map(|(n, k)| (n.to_string(), *k)).collect();
     let node = |name: &str, list: &[(&str, Kind)]| NodeTypeSpec {
         name: name.into(),
-        file: format!("nodes_{name}.csv"),
+        file: format!("nodes_{name}.{format}"),
         primary_key: "nodeId".into(),
         properties: props(list),
     };
@@ -15,9 +22,11 @@ pub fn schema() -> Schema {
         name: name.into(),
         from_type: from.into(),
         to_type: to.into(),
-        file: format!("edges_{name}__{from}__{to}.csv"),
-        from_column: "src".into(),
-        to_column: "dst".into(),
+        backing: Backing::Dataset {
+            file: format!("edges_{name}__{from}__{to}.{format}"),
+            from_column: "src".into(),
+            to_column: "dst".into(),
+        },
     };
     Schema {
         node_types: vec![

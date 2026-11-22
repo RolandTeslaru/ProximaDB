@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use proximadb::Live;
 use proximadb::core::Kind;
-use proximadb::load::{self, LinkTypeSpec, NodeTypeSpec, Schema};
+use proximadb::load::{self, Backing, LinkTypeSpec, NodeTypeSpec, Schema};
 use proximadb::query::cypher::{self, Answer};
 use proximadb::query::subgraph::Role;
 use proximadb::storage::Graph;
@@ -75,9 +75,11 @@ fn link_type(name: &str, from: &str, to: &str) -> LinkTypeSpec {
         name: name.into(),
         from_type: from.into(),
         to_type: to.into(),
-        file: format!("{name}.csv"),
-        from_column: "from".into(),
-        to_column: "to".into(),
+        backing: Backing::Dataset {
+            file: format!("{name}.csv"),
+            from_column: "from".into(),
+            to_column: "to".into(),
+        },
     }
 }
 

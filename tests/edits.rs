@@ -8,7 +8,7 @@ use proximadb::Graph;
 use proximadb::core::Direction;
 use proximadb::core::Kind;
 use proximadb::core::node::GlobalId;
-use proximadb::load::{self, LinkTypeSpec, NodeTypeSpec, Schema};
+use proximadb::load::{self, Backing, LinkTypeSpec, NodeTypeSpec, Schema};
 use proximadb::query::condition::{self, Condition, Op, Value};
 use proximadb::query::walk::{self, Reach, Through};
 use proximadb::{Live, Store, View};
@@ -50,17 +50,21 @@ fn schema() -> Schema {
                 name: "FOLLOWS".into(),
                 from_type: "Person".into(),
                 to_type: "Person".into(),
-                file: "FOLLOWS.csv".into(),
-                from_column: "src".into(),
-                to_column: "dst".into(),
+                backing: Backing::Dataset {
+                    file: "FOLLOWS.csv".into(),
+                    from_column: "src".into(),
+                    to_column: "dst".into(),
+                },
             },
             LinkTypeSpec {
                 name: "OWNS".into(),
                 from_type: "Person".into(),
                 to_type: "Thing".into(),
-                file: "OWNS.csv".into(),
-                from_column: "src".into(),
-                to_column: "dst".into(),
+                backing: Backing::Dataset {
+                    file: "OWNS.csv".into(),
+                    from_column: "src".into(),
+                    to_column: "dst".into(),
+                },
             },
         ],
     }

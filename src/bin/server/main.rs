@@ -92,7 +92,8 @@ fn load_store(config: &Config) -> Result<&'static Store, String> {
     let schema = schema::schema_from(&config.schema).map_err(|e| format!("schema: {e}"))?;
 
     let started = Instant::now();
-    let graph = load::load(&config.data, &schema).map_err(|e| format!("load: {e}"))?;
+    let (graph, report) =
+        load::load_with_report(&config.data, &schema).map_err(|e| format!("load: {e}"))?;
 
     eprintln!(
         "loaded {} nodes in {:.2} s",
@@ -100,7 +101,31 @@ fn load_store(config: &Config) -> Result<&'static Store, String> {
         started.elapsed().as_secs_f64()
     );
 
+    print_skipped(&report);
+
     Ok(Box::leak(Box::new(Store::new(graph))))
+}
+
+
+/// What the load skipped: rows without a key or with a duplicate key, and links that are empty or point nowhere.
+fn print_skipped(report: &load::Report) {
+    for node_type in &report.node_types {
+        if node_type.without_key + node_type.duplicate_keys > 0 {
+            eprintln!(
+                "  {}: {} rows without a key, {} with a duplicate key",
+                node_type.name, node_type.without_key, node_type.duplicate_keys
+            );
+        }
+    }
+
+    for link_type in &report.link_types {
+        if link_type.empty + link_type.dangling > 0 {
+            eprintln!(
+                "  {}: {} links, {} with an empty key, {} pointing to no node",
+                link_type.name, link_type.links, link_type.empty, link_type.dangling
+            );
+        }
+    }
 }
 
 
