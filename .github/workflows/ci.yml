@@ -17,6 +17,9 @@ permissions:
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/proximadb
+  # Replaces target-cpu=native from .cargo/config.toml: cached dependencies built on one runner's CPU crash
+  # with an illegal instruction on another's. Every x86 runner has these instructions.
+  RUSTFLAGS: -C target-cpu=x86-64-v3
 
 jobs:
   test:

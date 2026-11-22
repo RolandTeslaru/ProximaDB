@@ -68,8 +68,11 @@ impl<S: Read + Write> Client<S> {
         let stream = self.stream.get_mut();
 
         stream.write_all(head.as_bytes()).unwrap();
-        stream.write_all(body).unwrap();
-        stream.flush().unwrap();
+
+        // A request refused from its head alone (a wrong content type) is answered and the connection closed
+        // without reading the body, so writing the body may fail. The answer is still there to receive.
+        let _ = stream.write_all(body);
+        let _ = stream.flush();
     }
 
 
