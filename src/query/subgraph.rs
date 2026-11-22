@@ -13,10 +13,11 @@ use std::collections::VecDeque;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::collections::bitset::Bitset;
+use crate::collections::index_vec::IndexVec;
 use crate::core::Direction;
 use crate::core::node::GlobalId;
 use crate::kinetic::live::{TableRef, View};
-use crate::query::walk::{Reach, Through};
+use crate::query::walk::{Reach, Through, reverse};
 use crate::storage::link_type;
 use crate::storage::node_type;
 
@@ -144,45 +145,177 @@ pub fn shortest_path(
     max_steps: u32,
     through: Option<&Through>,
 ) -> Option<Subgraph> {
-    let tables = view.tables_by_type(link_types, direction);
+    if from == to {
+        return Some(tree_of(&[from], &[], &FxHashMap::default(), false));
+    }
 
-    let mut parent: FxHashMap<GlobalId, (GlobalId, LinkRef)> = FxHashMap::default();
-    let mut seen: FxHashSet<GlobalId> = [from].into_iter().collect();
-    let mut frontier = vec![from];
+    // Two searches, as in `walk::path_length`: one from each end, until they meet.
+    let forward_tables = view.tables_by_type(link_types, direction);
+    let backward_tables = view.tables_by_type(link_types, reverse(direction));
 
-    for _ in 0..max_steps {
-        if frontier.is_empty() {
+    let mut start_side = Side::new(from);
+    let mut end_side = Side::new(to);
+    let mut meeting: Meeting = None;
+
+    loop {
+        let steps = start_side.level + end_side.level;
+
+        // No meeting found later can be shorter than one step more than both searches have gone.
+        let found_shortest = meeting.is_some_and(|(_, length)| length <= steps + 1);
+
+        if found_shortest || steps >= max_steps {
             break;
         }
 
-        let mut next = Vec::new();
-
-        for &u in &frontier {
-            for table in &tables[view.type_of(u)] {
-                view.for_each(table, u, |v| {
-                    if seen.contains(&v) {
-                        return;
-                    }
-
-                    if v != to && !allowed_onto(view, through, table, v) {
-                        return;
-                    }
-
-                    seen.insert(v);
-                    parent.insert(v, (u, link_of(table, u, v)));
-                    next.push(v);
-                });
-            }
-
-            if parent.contains_key(&to) {
-                return Some(tree_of(&[from], &[to], &parent, false));
-            }
+        if start_side.front.is_empty() || end_side.front.is_empty() {
+            break;
         }
 
-        frontier = next;
+        // Grow the side whose current step is smaller.
+        if start_side.front.len() <= end_side.front.len() {
+            grow(
+                view,
+                &forward_tables,
+                through,
+                &mut start_side,
+                &end_side,
+                &mut meeting,
+            );
+        } else {
+            grow(
+                view,
+                &backward_tables,
+                through,
+                &mut end_side,
+                &start_side,
+                &mut meeting,
+            );
+        }
     }
 
-    (from == to).then(|| tree_of(&[from], &[], &parent, false))
+    let (meet, length) = meeting?;
+
+    if length > max_steps {
+        return None;
+    }
+
+    let path = path_through(meet, &start_side, &end_side);
+
+    Some(tree_of(&[from], &[to], &path, false))
+}
+
+
+/// One end's search in `shortest_path`.
+struct Side {
+    /// Steps from this side's end to each node it reached.
+    distance: FxHashMap<GlobalId, u32>,
+
+    /// The node each reached node was reached from, and the link between them.
+    reached_from: FxHashMap<GlobalId, (GlobalId, LinkRef)>,
+
+    /// The nodes reached in the last step.
+    front: Vec<GlobalId>,
+
+    /// How many steps this side has gone.
+    level: u32,
+}
+
+
+impl Side {
+    fn new(end: GlobalId) -> Self {
+        Side {
+            distance: [(end, 0)].into_iter().collect(),
+            reached_from: FxHashMap::default(),
+            front: vec![end],
+            level: 0,
+        }
+    }
+}
+
+
+/// The shortest meeting of the two searches so far: the node they met at, and the path's length through it.
+type Meeting = Option<(GlobalId, u32)>;
+
+
+/// Takes one step from every node in `side`'s front, noting where it meets `other`.
+fn grow(
+    view: &View,
+    tables: &IndexVec<node_type::Id, Vec<TableRef>>,
+    through: Option<&Through>,
+    side: &mut Side,
+    other: &Side,
+    meeting: &mut Meeting,
+) {
+    let Side {
+        distance,
+        reached_from,
+        front,
+        level,
+    } = side;
+
+    let mut next = Vec::new();
+
+    for &u in front.iter() {
+        for table in &tables[view.type_of(u)] {
+            view.for_each(table, u, |v| {
+                if distance.contains_key(&v) {
+                    return;
+                }
+
+                let theirs = other.distance.get(&v).copied();
+
+                // The other search's own end is always allowed onto; every other node must be.
+                let is_other_end = theirs == Some(0);
+
+                if !is_other_end && !allowed_onto(view, through, table, v) {
+                    return;
+                }
+
+                distance.insert(v, *level + 1);
+                reached_from.insert(v, (u, link_of(table, u, v)));
+                next.push(v);
+
+                if let Some(theirs) = theirs {
+                    let length = *level + 1 + theirs;
+
+                    if meeting.is_none_or(|(_, best)| length < best) {
+                        *meeting = Some((v, length));
+                    }
+                }
+            });
+        }
+    }
+
+    *front = next;
+    *level += 1;
+}
+
+
+/// The path through `meet`, as `tree_of` takes it: each node on it with the node before it and the link between.
+fn path_through(
+    meet: GlobalId,
+    start_side: &Side,
+    end_side: &Side,
+) -> FxHashMap<GlobalId, (GlobalId, LinkRef)> {
+    let mut before = FxHashMap::default();
+
+    // From the meeting back to the start, as the start's search reached each node.
+    let mut node = meet;
+
+    while let Some(&step) = start_side.reached_from.get(&node) {
+        before.insert(node, step);
+        node = step.0;
+    }
+
+    // From the meeting on to the end: the end's search reached `node` from `next`, so `node` comes before `next`.
+    let mut node = meet;
+
+    while let Some(&(next, link)) = end_side.reached_from.get(&node) {
+        before.insert(next, (node, link));
+        node = next;
+    }
+
+    before
 }
 
 
