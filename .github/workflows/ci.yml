@@ -1,7 +1,7 @@
 # Tests every pull request and every push to master.
 #
 # A version tag (v0.1.0) on a commit of master that passes the tests releases it:
-#   - the server image for linux/amd64 and linux/arm64, as ghcr.io/<owner>/proximadb:0.1.0 and :latest;
+#   - the server image for linux/amd64 and linux/arm64, as ghcr.io/rolandteslaru/proximadb:0.1.0 and :latest;
 #   - a GitHub Release with the static Linux binaries for both, and their checksums.
 name: ci
 
@@ -16,7 +16,8 @@ permissions:
   packages: write
 
 env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/proximadb
+  # Image names must be lowercase, and the owner's name isn't.
+  IMAGE: ghcr.io/rolandteslaru/proximadb
   # Replaces target-cpu=native from .cargo/config.toml: cached dependencies built on one runner's CPU crash
   # with an illegal instruction on another's. Every x86 runner has these instructions.
   RUSTFLAGS: -C target-cpu=x86-64-v3
@@ -148,4 +149,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" binaries/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes \
-            --notes "Image: \`ghcr.io/${{ github.repository_owner }}/proximadb:${GITHUB_REF_NAME#v}\`"
+            --notes "Image: \`$IMAGE:${GITHUB_REF_NAME#v}\`"
