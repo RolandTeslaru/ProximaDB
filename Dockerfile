@@ -29,6 +29,10 @@ RUN case "$TARGETARCH" in amd64) cpu=x86-64-v3 ;; arm64) cpu=neoverse-n1 ;; esac
  && mkdir -p /out/run/proximadb \
  && chown 65532:65532 /out/run/proximadb
 
+# The bare binary, for release downloads: docker buildx build --target binary --output type=local,dest=out .
+FROM scratch AS binary
+COPY --from=build /proximadb /proximadb
+
 FROM scratch
 COPY --from=build /proximadb /proximadb
 COPY --from=build /out/run /run
