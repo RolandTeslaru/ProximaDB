@@ -25,6 +25,12 @@ use proximadb::storage::Graph;
 
 
 fn graph() -> Graph {
+    graph_with_follows("from,to\nana,ben\nana,cleo\nben,dan\ncleo,eve\ndan,eve\n")
+}
+
+
+/// The example graph with other follows, as a CSV with a header row.
+fn graph_with_follows(follows: &str) -> Graph {
     // A folder of this test's own: tests run in parallel.
     let folder = common::Dir::new();
     let dir = folder.path().to_path_buf();
@@ -35,11 +41,7 @@ fn graph() -> Graph {
     )
     .unwrap();
     fs::write(dir.join("Thing.csv"), "key\nphone\nlaptop\n").unwrap();
-    fs::write(
-        dir.join("FOLLOWS.csv"),
-        "from,to\nana,ben\nana,cleo\nben,dan\ncleo,eve\ndan,eve\n",
-    )
-    .unwrap();
+    fs::write(dir.join("FOLLOWS.csv"), follows).unwrap();
     fs::write(dir.join("OWNS.csv"), "from,to\nana,phone\ndan,laptop\n").unwrap();
 
     let schema = Schema {
@@ -407,4 +409,59 @@ fn counts_keys_and_length_zero() {
         "MATCH (a:Person {key: 'ana'}) WHERE a.age = 31 RETURN a",
     );
     assert_eq!(fails.count, Some(0));
+}
+
+
+/// A loop leads back to the start: by default it counts like any other node, as in standard Cypher, and
+/// `WHERE b <> a` leaves it out.
+#[test]
+fn the_start_around_a_loop() {
+    // ana → ben → ana, and ben → cleo.
+    let g = graph_with_follows("from,to\nana,ben\nben,ana\nben,cleo\n");
+
+    let with_start = "MATCH (a:Person {key: 'ana'})-[:FOLLOWS*1..3]->(b:Person) RETURN b";
+    let answer = run(&g, with_start);
+    assert_eq!(answer.count, Some(3));
+    assert!(keys(&g, &answer, Role::Match).contains("ana"));
+
+    let without_start =
+        "MATCH (a:Person {key: 'ana'})-[:FOLLOWS*1..3]->(b:Person) WHERE b <> a RETURN b";
+    let answer = run(&g, without_start);
+    assert_eq!(answer.count, Some(2));
+    assert_eq!(
+        keys(&g, &answer, Role::Match),
+        ["ben", "cleo"].map(String::from).into()
+    );
+
+    // With other conditions, either way round, and when only counting.
+    let active = "MATCH (a:Person {key: 'ana'})-[:FOLLOWS*1..3]->(b:Person) \
+                  WHERE a <> b AND b.status = 'active' RETURN count(b)";
+    assert_eq!(
+        run(&g, active).count,
+        Some(1),
+        "ben; cleo is inactive and ana is the start"
+    );
+
+    // `*0..` would match the start itself; `b <> a` still leaves it out.
+    let from_zero =
+        "MATCH (a:Person {key: 'ana'})-[:FOLLOWS*0..3]->(b:Person) WHERE b <> a RETURN count(b)";
+    assert_eq!(run(&g, from_zero).count, Some(2));
+}
+
+
+#[test]
+fn comparing_nodes_other_than_the_start_and_end_is_an_error() {
+    let g = graph();
+
+    let message = error(
+        &g,
+        "MATCH (a:Person {key: 'ana'})-[:FOLLOWS*1..3]->(b:Person) WHERE b <> c RETURN b",
+    );
+    assert!(message.contains("start and the end"), "{message}");
+
+    let message = error(
+        &g,
+        "MATCH (a:Person {key: 'ana'})-[:FOLLOWS*1..3]->(b:Person) WHERE b <> a OR b.age > 40 RETURN b",
+    );
+    assert!(message.contains("OR and NOT"), "{message}");
 }
