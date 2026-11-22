@@ -69,7 +69,7 @@ pub struct ReachResult {
     pub scanned: u64,
 }
 
-fn reverse(d: Direction) -> Direction {
+pub(crate) fn reverse(d: Direction) -> Direction {
     match d {
         Direction::Forward => Direction::Backward,
         Direction::Backward => Direction::Forward,
