@@ -66,6 +66,7 @@ The server has no authentication: keep it on loopback or a private network.
 | [Cypher](docs/cypher.md) | what queries are supported and what they return |
 | [Getting data in](docs/data.md) | the schema file, link backings, actions, reloads |
 | [Rust library](docs/library.md) | using ProximaDB without the server |
+| [Benchmarks](docs/benchmarks.md) | the server in Docker, queried with Cypher, on 0.5 to 7.3 million nodes |
 
 Code rules are in
 `AGENTS.md`.
