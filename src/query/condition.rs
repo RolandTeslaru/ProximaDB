@@ -300,7 +300,7 @@ pub fn evaluate(view: &View, t: node_type::Id, cond: &Condition) -> Bitset {
     let mut touched: FxHashSet<u64> = (base..total).collect();
     for name in &names {
         let pi = property_index(graph, t, name);
-        let log = &view.live.props[t][pi].log;
+        let log = &view.live.property_log(t, pi).log;
         for i in 0..log.len() {
             let c = log.get(i).unwrap();
             if c.seq <= view.upto {
@@ -314,7 +314,7 @@ pub fn evaluate(view: &View, t: node_type::Id, cond: &Condition) -> Bitset {
             let pi = property_index(graph, t, name);
             let p = &graph.node_types[t].properties[pi];
             match latest.get(&(pi, local)) {
-                Some(&raw) => decode(p, &view.live.props[t][pi], raw),
+                Some(&raw) => decode(p, view.live.property_log(t, pi), raw),
                 None if local < base => base_value(p, local),
                 None => Val::Missing,
             }

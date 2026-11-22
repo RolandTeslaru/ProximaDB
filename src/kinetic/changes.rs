@@ -21,6 +21,23 @@ pub struct PropertyLog {
     pub extra_strings: RwLock<Vec<String>>,
 }
 
+
+impl PropertyLog {
+    pub fn new() -> Self {
+        Self {
+            log: BlockList::new(),
+            extra_strings: RwLock::new(Vec::new()),
+        }
+    }
+}
+
+
+impl Default for PropertyLog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The value types a change reads back as.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Val {

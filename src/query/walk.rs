@@ -149,11 +149,11 @@ pub fn reach(view: &View, q: &Reach) -> ReachResult {
         };
         per_step.push(next.len() as u64);
         reached.extend_from_slice(&next);
-        if let Some(cap) = q.cap {
-            if reached.len() as u64 >= cap {
-                capped = true;
-                break;
-            }
+        if let Some(cap) = q.cap
+            && reached.len() as u64 >= cap
+        {
+            capped = true;
+            break;
         }
         frontier = next;
     }
@@ -180,7 +180,9 @@ fn push_step(
                 if visited.get(v.index()) {
                     return;
                 }
-                if view.is_deleted(v) || through.is_some_and(|t| !t.allows(view, table.other_type, v)) {
+                if view.is_deleted(v)
+                    || through.is_some_and(|t| !t.allows(view, table.other_type, v))
+                {
                     visited.test_and_set(v.index()); // never allowed: don't look at it again
                     return;
                 }
@@ -241,10 +243,10 @@ fn pull_step(
             if tables.is_empty() || view.is_deleted(g) {
                 continue;
             }
-            if let Some(t) = through {
-                if !t.allows(view, ty, g) {
-                    continue;
-                }
+            if let Some(t) = through
+                && !t.allows(view, ty, g)
+            {
+                continue;
             }
             for table in tables {
                 if view.any(table, g, |u| current.get(u.index()), checked) {

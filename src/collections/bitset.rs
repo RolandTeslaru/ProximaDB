@@ -112,22 +112,25 @@ impl Bitset {
         word: impl Fn(u64, u64) -> u64,
     ) {
         assert_eq!(self.len, other.len);
-        let mut a = self.words.chunks_exact_mut(4);
-        let mut b = other.words.chunks_exact(4);
-        for (x, y) in (&mut a).zip(&mut b) {
-            lanes(Lanes::from_slice(x), Lanes::from_slice(y)).copy_to_slice(x);
+        let (mine, my_rest) = self.words.as_chunks_mut::<4>();
+        let (theirs, their_rest) = other.words.as_chunks::<4>();
+
+        for (x, y) in mine.iter_mut().zip(theirs) {
+            lanes(Lanes::from_array(*x), Lanes::from_array(*y)).copy_to_slice(x);
         }
-        for (x, y) in a.into_remainder().iter_mut().zip(b.remainder()) {
+
+        for (x, y) in my_rest.iter_mut().zip(their_rest) {
             *x = word(*x, *y);
         }
     }
 
     fn trim(&mut self) {
         let extra = self.words.len() * 64 - self.len;
-        if extra > 0 {
-            if let Some(last) = self.words.last_mut() {
-                *last &= u64::MAX >> extra;
-            }
+
+        if extra > 0
+            && let Some(last) = self.words.last_mut()
+        {
+            *last &= u64::MAX >> extra;
         }
     }
 

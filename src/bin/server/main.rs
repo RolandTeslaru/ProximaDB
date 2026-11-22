@@ -1,104 +1,188 @@
 //! ProximaDB's HTTP server: JSON over HTTP/1.1 with keep-alive, on a Unix domain socket and/or a TCP port.
 //!
+//! Startup, in order:
+//!
+//!   1. Read the command line (`config`) and the schema file (`schema`).
+//!   2. Load the graph from the data files into a `Store`.
+//!   3. Start the writer thread (`writes`): the one thread that applies actions.
+//!   4. Serve the routes on each listener.
+//!
+//! While serving:
+//!
 //! - Connections and HTTP: tokio + axum, a few threads for any number of connections.
-//! - Reads: each request takes the current generation and runs on the rayon pool (CPU and memory bound work never
-//!   runs on tokio's threads). At most one read per core runs at a time; the rest wait their turn.
-//! - Writes: the one writer thread, fed by a bounded channel. Each action carries Quarry's sequence number and is
-//!   published whole. When no action arrives for a while the writer runs its idle check (rebuilds).
+//! - Reads (`reads`): each request takes the current generation and runs on the rayon pool, never on tokio's
+//!   threads. At most one read per core runs at a time; the rest wait their turn.
+//! - Writes (`writes`): actions go through a bounded queue to the writer thread. Each carries Quarry's sequence
+//!   number and is published whole. With no action for a while, the writer runs its idle check (rebuilds).
 //! - Read-your-writes: a read with `after: N` waits until action N is published.
 //!
-//! Every request is checked before it reaches the engine: a release build aborts on a panic, so a wrong name or value
-//! must be a 400, never a panic.
+//! Every request is checked (`check`) before it reaches the engine: a release build aborts on a panic, so a wrong
+//! name or value must be a 400, never a panic.
 //!
 //!     server --schema schema.json --data <dir> [--unix /tmp/proximadb.sock] [--tcp 127.0.0.1:7600]
 
 mod api;
 mod check;
+mod config;
 mod reads;
 mod schema;
 mod state;
 mod writes;
 
 use std::future::IntoFuture;
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::Router;
 use axum::routing::{get, post};
 use axum::serve::ListenerExt;
+use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{Semaphore, mpsc, watch};
+use tokio::task::JoinHandle;
 
 use proximadb::Store;
 use proximadb::load;
 
-use crate::state::AppState;
+use crate::config::Config;
+use crate::state::{AppState, Shared};
 
-fn main() {
-    let mut args = std::env::args().skip(1);
-    let (mut schema, mut data, mut unix, mut tcp) = (None, None, None, None);
-    while let Some(a) = args.next() {
-        let mut value = || args.next().unwrap_or_else(|| panic!("{a} needs a value"));
-        match a.as_str() {
-            "--schema" => schema = Some(PathBuf::from(value())),
-            "--data" => data = Some(PathBuf::from(value())),
-            "--unix" => unix = Some(PathBuf::from(value())),
-            "--tcp" => tcp = Some(value()),
-            other => panic!("unknown argument {other}"),
+/// musl's own allocator is slow with many threads; mimalloc is fast everywhere.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// Threads for connections and HTTP; the queries themselves run on rayon's pool.
+const HTTP_THREADS: usize = 2;
+
+/// Any user that can see the socket may connect: it lives in a directory shared only with the client (a volume
+/// between two containers, or a directory with its own permissions).
+const SOCKET_MODE: u32 = 0o666;
+
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+
+        Err(message) => {
+            eprintln!("proximadb: {message}");
+            ExitCode::FAILURE
         }
     }
-    let schema = schema::schema_from(&schema.expect("--schema")).unwrap_or_else(|e| panic!("schema: {e}"));
-    if unix.is_none() && tcp.is_none() {
-        tcp = Some("127.0.0.1:7600".into());
-    }
-    let started = std::time::Instant::now();
-    let graph = load::load(&data.expect("--data"), &schema).unwrap_or_else(|e| panic!("load: {e}"));
-    eprintln!("loaded {} nodes in {:.2} s", graph.node_count(), started.elapsed().as_secs_f64());
+}
 
-    let store: &'static Store = Box::leak(Box::new(Store::new(graph)));
-    let (writes, rx) = mpsc::channel(writes::WRITE_QUEUE);
-    let (published_tx, published) = watch::channel(store.current().live.published());
+
+fn run() -> Result<(), String> {
+    let config = Config::from_args(std::env::args().skip(1))?;
+
+    let store = load_store(&config)?;
+
+    let state = start_writer(store);
+
+    serve(config, router(state))
+}
+
+
+/// Loads the graph once; the store lives as long as the process, so it is leaked to a `'static` reference that
+/// the writer thread and every request can hold.
+fn load_store(config: &Config) -> Result<&'static Store, String> {
+    let schema = schema::schema_from(&config.schema).map_err(|e| format!("schema: {e}"))?;
+
+    let started = Instant::now();
+    let graph = load::load(&config.data, &schema).map_err(|e| format!("load: {e}"))?;
+
+    eprintln!(
+        "loaded {} nodes in {:.2} s",
+        graph.node_count(),
+        started.elapsed().as_secs_f64()
+    );
+
+    Ok(Box::leak(Box::new(Store::new(graph))))
+}
+
+
+fn start_writer(store: &'static Store) -> Shared {
+    let (writes, queue) = mpsc::channel(writes::WRITE_QUEUE);
+    let (published_sender, published) = watch::channel(store.current().live.published());
+
     std::thread::Builder::new()
         .name("writer".into())
-        .spawn(move || writes::writer_thread(store, rx, published_tx))
-        .unwrap();
-    let state = Arc::new(AppState {
+        .spawn(move || writes::writer_thread(store, queue, published_sender))
+        .expect("the writer thread starts");
+
+    Arc::new(AppState {
         store,
         reads: Semaphore::new(rayon::current_num_threads()),
         writes,
         published,
-    });
-    let app = Router::new()
+    })
+}
+
+
+fn router(state: Shared) -> Router {
+    Router::new()
         .route("/health", get(reads::health))
         .route("/reach", post(reads::reach))
         .route("/path", post(reads::path))
         .route("/actions", post(writes::action))
-        .with_state(state);
+        .with_state(state)
+}
 
+
+/// Serves on every configured listener until they all stop.
+fn serve(config: Config, app: Router) -> Result<(), String> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
+        .worker_threads(HTTP_THREADS)
         .enable_all()
         .build()
-        .unwrap();
+        .map_err(|e| format!("runtime: {e}"))?;
+
     runtime.block_on(async move {
         let mut servers = Vec::new();
-        if let Some(path) = unix {
-            let _ = std::fs::remove_file(&path);
-            let listener = tokio::net::UnixListener::bind(&path).expect("bind unix socket");
-            eprintln!("listening on unix:{}", path.display());
-            servers.push(tokio::spawn(axum::serve(listener, app.clone()).into_future()));
+
+        if let Some(path) = &config.unix_socket {
+            servers.push(serve_unix(path, app.clone())?);
         }
-        if let Some(addr) = tcp {
-            let listener = tokio::net::TcpListener::bind(&addr)
-                .await
-                .expect("bind tcp")
-                .tap_io(|tcp| {
-                    let _ = tcp.set_nodelay(true);
-                });
-            eprintln!("listening on http://{addr}");
-            servers.push(tokio::spawn(axum::serve(listener, app).into_future()));
+
+        if let Some(address) = &config.tcp_address {
+            servers.push(serve_tcp(address, app).await?);
         }
-        for s in servers {
-            let _ = s.await;
+
+        for server in servers {
+            let _ = server.await;
         }
-    });
+
+        Ok(())
+    })
+}
+
+
+fn serve_unix(path: &Path, app: Router) -> Result<JoinHandle<std::io::Result<()>>, String> {
+    // A socket file left by an earlier run would make the bind fail.
+    let _ = std::fs::remove_file(path);
+
+    let listener = UnixListener::bind(path).map_err(|e| format!("bind {}: {e}", path.display()))?;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(SOCKET_MODE))
+        .map_err(|e| format!("socket permissions: {e}"))?;
+
+    eprintln!("listening on unix:{}", path.display());
+
+    Ok(tokio::spawn(axum::serve(listener, app).into_future()))
+}
+
+
+async fn serve_tcp(address: &str, app: Router) -> Result<JoinHandle<std::io::Result<()>>, String> {
+    let listener = TcpListener::bind(address)
+        .await
+        .map_err(|e| format!("bind {address}: {e}"))?
+        .tap_io(|connection| {
+            // Small requests go out at once instead of waiting to be batched.
+            let _ = connection.set_nodelay(true);
+        });
+
+    eprintln!("listening on http://{address}");
+
+    Ok(tokio::spawn(axum::serve(listener, app).into_future()))
 }

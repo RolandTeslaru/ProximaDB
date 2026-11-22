@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use axum::Json;
-use axum::http::StatusCode;
+use axum::http::{HeaderName, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
@@ -11,17 +11,39 @@ use proximadb::core::{Direction, Value};
 
 pub(crate) struct ApiError(pub(crate) StatusCode, pub(crate) String);
 
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.0, Json(serde_json::json!({ "error": self.1 }))).into_response()
     }
 }
 
+
 pub(crate) fn bad(message: impl Into<String>) -> ApiError {
     ApiError(StatusCode::BAD_REQUEST, message.into())
 }
 
+
 pub(crate) type ApiResult<T> = Result<Json<T>, ApiError>;
+
+
+/// A read's answer with the time the engine spent on it, in microseconds, as `x-proximadb-us`: the rest of a
+/// round trip is the transport.
+pub(crate) type TimedResult<T> = Result<([(HeaderName, String); 1], Json<T>), ApiError>;
+
+
+pub(crate) fn timed<T>(result: ApiResult<T>, took: std::time::Duration) -> TimedResult<T> {
+    result.map(|json| {
+        (
+            [(
+                HeaderName::from_static("x-proximadb-us"),
+                took.as_micros().to_string(),
+            )],
+            json,
+        )
+    })
+}
+
 
 #[derive(Deserialize)]
 pub(crate) struct NodeRef {
@@ -29,6 +51,7 @@ pub(crate) struct NodeRef {
     pub(crate) node_type: String,
     pub(crate) key: String,
 }
+
 
 #[derive(Deserialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
@@ -38,15 +61,17 @@ pub(crate) enum Dir {
     Both,
 }
 
+
 impl From<Dir> for Direction {
-    fn from(d: Dir) -> Self {
-        match d {
+    fn from(direction: Dir) -> Self {
+        match direction {
             Dir::Forward => Direction::Forward,
             Dir::Backward => Direction::Backward,
             Dir::Both => Direction::Both,
         }
     }
 }
+
 
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -56,27 +81,42 @@ pub(crate) enum JsonValue {
     Str(String),
 }
 
+
 impl From<&JsonValue> for Value {
-    fn from(v: &JsonValue) -> Self {
-        match v {
-            JsonValue::Bool(b) => Value::Bool(*b),
-            JsonValue::Num(n) => Value::Num(*n),
-            JsonValue::Str(s) => Value::Str(s.clone()),
+    fn from(value: &JsonValue) -> Self {
+        match value {
+            JsonValue::Bool(flag) => Value::Bool(*flag),
+            JsonValue::Num(number) => Value::Num(*number),
+            JsonValue::Str(text) => Value::Str(text.clone()),
         }
     }
 }
+
 
 /// `{"property": "status", "op": "eq", "value": "active"}`, `{"has": "name"}`, `{"and": [..]}`, `{"or": [..]}`,
 /// `{"not": {..}}`.
 #[derive(Deserialize)]
 #[serde(untagged)]
 pub(crate) enum JsonCondition {
-    Compare { property: String, op: String, value: JsonValue },
-    Has { has: String },
-    And { and: Vec<JsonCondition> },
-    Or { or: Vec<JsonCondition> },
-    Not { not: Box<JsonCondition> },
+    Compare {
+        property: String,
+        op: String,
+        value: JsonValue,
+    },
+    Has {
+        has: String,
+    },
+    And {
+        and: Vec<JsonCondition>,
+    },
+    Or {
+        or: Vec<JsonCondition>,
+    },
+    Not {
+        not: Box<JsonCondition>,
+    },
 }
+
 
 /// A condition on the nodes of one type.
 #[derive(Deserialize)]
@@ -86,6 +126,7 @@ pub(crate) struct Filter {
     #[serde(rename = "where")]
     pub(crate) condition: JsonCondition,
 }
+
 
 #[derive(Deserialize)]
 pub(crate) struct ReachRequest {
@@ -113,6 +154,7 @@ pub(crate) struct ReachRequest {
     pub(crate) after: Option<u64>,
 }
 
+
 #[derive(Serialize)]
 pub(crate) struct ReachResponse {
     pub(crate) count: u64,
@@ -123,12 +165,14 @@ pub(crate) struct ReachResponse {
     pub(crate) seq: u64,
 }
 
+
 #[derive(Serialize)]
 pub(crate) struct KeyOut {
     #[serde(rename = "type")]
     pub(crate) node_type: String,
     pub(crate) key: String,
 }
+
 
 #[derive(Deserialize)]
 pub(crate) struct PathRequest {
@@ -146,11 +190,13 @@ pub(crate) struct PathRequest {
     pub(crate) after: Option<u64>,
 }
 
+
 #[derive(Serialize)]
 pub(crate) struct PathResponse {
     pub(crate) length: Option<u32>,
     pub(crate) seq: u64,
 }
+
 
 /// One action: Quarry's sequence number (strictly increasing) and its edits, applied and published together.
 #[derive(Deserialize)]
@@ -158,6 +204,7 @@ pub(crate) struct ActionRequest {
     pub(crate) seq: u64,
     pub(crate) edits: Vec<Edit>,
 }
+
 
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -188,6 +235,7 @@ pub(crate) enum Edit {
         to: NodeRef,
     },
 }
+
 
 #[derive(Serialize)]
 pub(crate) struct ActionResponse {

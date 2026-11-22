@@ -230,7 +230,7 @@ fn compare(view: &View, fresh: &Graph, model: &Model, rng: &mut Rng, label: &str
 #[test]
 fn random_edits_match_a_rebuild() {
     for round in 0..6 {
-        let mut rng = Rng(0x9E37_79B9_7F4A_7C15 ^ (round as u64 + 1) * 0x1234_5678);
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15 ^ ((round as u64 + 1) * 0x1234_5678));
         let mut model = random_model(&mut rng, 120, 30, 360, 80);
         let dir = temp(&format!("base-{round}"));
         model.write(&dir);
@@ -278,7 +278,7 @@ fn random_edits_match_a_rebuild() {
                         w.set_property(g, "color", &Value::Str("green".into()));
                         model.things.insert(key, "green".into());
                     }
-                    2 | 3 | 4 => {
+                    2..=4 => {
                         let (a, b) = (pick(&mut rng), pick(&mut rng));
                         w.add_link(
                             follows,

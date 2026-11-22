@@ -1,0 +1,2 @@
+# rustfmt's defaults, plus room to breathe between items (see AGENTS.md).
+blank_lines_upper_bound = 3

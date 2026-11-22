@@ -112,7 +112,12 @@ impl SideTable {
     }
 
     /// Writer only: marks the first live entry of `node` pointing to `target` as removed by action `seq`.
-    pub fn remove(&self, node: node::GlobalId, target: node::GlobalId, seq: u64) -> Option<link::Id> {
+    pub fn remove(
+        &self,
+        node: node::GlobalId,
+        target: node::GlobalId,
+        seq: u64,
+    ) -> Option<link::Id> {
         let mut c = self.heads.load(node.0);
         while c != NONE {
             let chunk = self.chunk(c);
@@ -132,7 +137,12 @@ impl SideTable {
 
     /// Calls `f(target, link)` for every entry of `node` added at or before `upto` and not removed by then.
     #[inline]
-    pub fn for_each(&self, node: node::GlobalId, upto: u64, mut f: impl FnMut(node::GlobalId, link::Id)) {
+    pub fn for_each(
+        &self,
+        node: node::GlobalId,
+        upto: u64,
+        mut f: impl FnMut(node::GlobalId, link::Id),
+    ) {
         let mut c = self.heads.load(node.0);
         while c != NONE {
             let chunk = self.chunk(c);

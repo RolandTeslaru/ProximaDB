@@ -303,7 +303,6 @@ fn main() {
         peak_rss_bytes() as f64 / 1e9
     );
     let now = split(&v, user, follows, &active, &starts_in(&v));
-    drop(v);
     drop(g);
     let mut w = store.writer();
     w.rebuild_and_wait();

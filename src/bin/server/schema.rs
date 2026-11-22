@@ -1,56 +1,112 @@
 //! The schema file: node types with their properties and source files, link types with their join files.
+//!
+//! ```json
+//! {
+//!   "node_types": [{"name": "User", "file": "users.csv", "primary_key": "id", "properties": {"status": "string"}}],
+//!   "link_types": [{"name": "FOLLOWS", "from_type": "User", "to_type": "User", "file": "follows.csv",
+//!                   "from_column": "src", "to_column": "dst"}]
+//! }
+//! ```
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use serde::Deserialize;
 
 use proximadb::core::Kind;
 use proximadb::load::{LinkTypeSpec, NodeTypeSpec, Schema};
 
-pub(crate) fn schema_from(path: &PathBuf) -> Result<Schema, String> {
-    let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    let s = |v: &serde_json::Value, k: &str| v[k].as_str().map(str::to_string).ok_or(format!("missing {k}"));
-    let kind = |k: &str| match k {
-        "string" => Ok(Kind::String),
-        "integer" => Ok(Kind::Integer),
-        "long" => Ok(Kind::Long),
-        "double" => Ok(Kind::Double),
-        "boolean" => Ok(Kind::Boolean),
-        "date" => Ok(Kind::Date),
-        "timestamp" => Ok(Kind::Timestamp),
-        other => Err(format!("unknown property kind {other}")),
-    };
-    let node_types = doc["node_types"]
-        .as_array()
-        .ok_or("missing node_types")?
-        .iter()
-        .map(|n| {
-            Ok(NodeTypeSpec {
-                name: s(n, "name")?,
-                file: s(n, "file")?,
-                primary_key: s(n, "primary_key")?,
-                properties: n["properties"]
-                    .as_object()
-                    .ok_or("missing properties")?
-                    .iter()
-                    .map(|(name, k)| Ok((name.clone(), kind(k.as_str().ok_or("kind must be text")?)?)))
-                    .collect::<Result<_, String>>()?,
-            })
+
+#[derive(Deserialize)]
+struct SchemaFile {
+    node_types: Vec<NodeTypeFile>,
+    link_types: Vec<LinkTypeFile>,
+}
+
+
+#[derive(Deserialize)]
+struct NodeTypeFile {
+    name: String,
+    file: String,
+    primary_key: String,
+    properties: BTreeMap<String, KindFile>,
+}
+
+
+#[derive(Deserialize)]
+struct LinkTypeFile {
+    name: String,
+    from_type: String,
+    to_type: String,
+    file: String,
+    from_column: String,
+    to_column: String,
+}
+
+
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+enum KindFile {
+    String,
+    Integer,
+    Long,
+    Double,
+    Boolean,
+    Date,
+    Timestamp,
+}
+
+
+impl From<KindFile> for Kind {
+    fn from(kind: KindFile) -> Self {
+        match kind {
+            KindFile::String => Kind::String,
+            KindFile::Integer => Kind::Integer,
+            KindFile::Long => Kind::Long,
+            KindFile::Double => Kind::Double,
+            KindFile::Boolean => Kind::Boolean,
+            KindFile::Date => Kind::Date,
+            KindFile::Timestamp => Kind::Timestamp,
+        }
+    }
+}
+
+
+pub(crate) fn schema_from(path: &Path) -> Result<Schema, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let file: SchemaFile =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+
+    let node_types = file
+        .node_types
+        .into_iter()
+        .map(|node_type| NodeTypeSpec {
+            name: node_type.name,
+            file: node_type.file,
+            primary_key: node_type.primary_key,
+            properties: node_type
+                .properties
+                .into_iter()
+                .map(|(name, kind)| (name, kind.into()))
+                .collect(),
         })
-        .collect::<Result<_, String>>()?;
-    let link_types = doc["link_types"]
-        .as_array()
-        .ok_or("missing link_types")?
-        .iter()
-        .map(|l| {
-            Ok(LinkTypeSpec {
-                name: s(l, "name")?,
-                from_type: s(l, "from_type")?,
-                to_type: s(l, "to_type")?,
-                file: s(l, "file")?,
-                from_column: s(l, "from_column")?,
-                to_column: s(l, "to_column")?,
-            })
+        .collect();
+
+    let link_types = file
+        .link_types
+        .into_iter()
+        .map(|link_type| LinkTypeSpec {
+            name: link_type.name,
+            from_type: link_type.from_type,
+            to_type: link_type.to_type,
+            file: link_type.file,
+            from_column: link_type.from_column,
+            to_column: link_type.to_column,
         })
-        .collect::<Result<_, String>>()?;
-    Ok(Schema { node_types, link_types })
+        .collect();
+
+    Ok(Schema {
+        node_types,
+        link_types,
+    })
 }

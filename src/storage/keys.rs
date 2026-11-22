@@ -2,6 +2,8 @@
 
 use std::hash::{Hash, Hasher};
 
+use std::collections::hash_map::Entry;
+
 use rustc_hash::{FxHashMap, FxHasher};
 
 use crate::core::node;
@@ -60,11 +62,14 @@ impl KeyIndex {
     }
 
     pub fn insert(&mut self, t: node_type::Id, key: &[u8], g: node::GlobalId) {
-        let h = hash(t, key);
-        if self.by_hash.contains_key(&h) {
-            self.collisions.insert((t.0, key.to_vec()), g.0);
-        } else {
-            self.by_hash.insert(h, g.0);
+        match self.by_hash.entry(hash(t, key)) {
+            Entry::Occupied(_) => {
+                self.collisions.insert((t.0, key.to_vec()), g.0);
+            }
+
+            Entry::Vacant(slot) => {
+                slot.insert(g.0);
+            }
         }
     }
 

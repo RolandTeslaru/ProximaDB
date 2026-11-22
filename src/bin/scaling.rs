@@ -9,10 +9,10 @@ use std::time::Instant;
 
 use proximadb::Graph;
 use proximadb::core::Direction;
+use proximadb::core::node::GlobalId;
 use proximadb::load;
 use proximadb::query::condition::{self, Condition, Op, Value};
 use proximadb::query::walk::{self, Reach, ReachResult, Through};
-use proximadb::core::node::GlobalId;
 use serde_json::Value as Json;
 
 #[path = "shared/dataset.rs"]

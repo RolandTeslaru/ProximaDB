@@ -15,9 +15,9 @@ use proximadb::query::condition::{self, Condition, Op, Value};
 #[path = "shared/dataset.rs"]
 mod dataset;
 use dataset::{peak_rss_bytes, schema};
+use proximadb::core::node::GlobalId;
 use proximadb::query::walk::{self, Reach, Through};
 use rayon::ThreadPool;
-use proximadb::core::node::GlobalId;
 use serde_json::{Value as Json, json};
 
 const RUNS: usize = 3;
@@ -371,7 +371,7 @@ fn main() {
     let mut wrong_total = 0;
     for (name, run, want, groups) in &queries {
         // correctness, on all threads
-        let got: Vec<Json> = all.install(|| (0..want.len()).map(|i| run(i)).collect());
+        let got: Vec<Json> = all.install(|| (0..want.len()).map(run).collect());
         let mut by_group: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
         for (i, g) in groups.iter().enumerate() {
             by_group.entry(g.as_str()).or_default().push(i);
