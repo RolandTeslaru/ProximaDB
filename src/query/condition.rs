@@ -47,6 +47,94 @@ impl Condition {
     }
 }
 
+/// `condition` checked against `t`'s properties, ready to evaluate: every property exists, every value has the
+/// property's kind (a date may be written as `YYYY-MM-DD`), and coded strings and booleans are only compared with `=`
+/// and `<>`. Evaluating an unchecked condition from outside input could panic.
+pub fn checked(graph: &Graph, t: node_type::Id, condition: Condition) -> Result<Condition, String> {
+    let property_of = |name: &str| {
+        graph
+            .property(t, name)
+            .ok_or_else(|| format!("{} has no property {name}", graph.node_types[t].name))
+    };
+
+    match condition {
+        Condition::Compare {
+            property: name,
+            op,
+            value,
+        } => {
+            let property = property_of(&name)?;
+            let value = value_of_kind(property, value)?;
+
+            let ordered = !matches!(
+                property.column,
+                Column::Coded8 { .. } | Column::Coded16 { .. } | Column::Boolean(_)
+            );
+
+            if !ordered && !matches!(op, Op::Eq | Op::Ne) {
+                return Err(format!("{name} can only be compared with = and <>"));
+            }
+
+            Ok(Condition::Compare {
+                property: name,
+                op,
+                value,
+            })
+        }
+
+        Condition::HasValue(name) => {
+            property_of(&name)?;
+
+            Ok(Condition::HasValue(name))
+        }
+
+        Condition::And(parts) => Ok(Condition::And(checked_all(graph, t, parts)?)),
+
+        Condition::Or(parts) => Ok(Condition::Or(checked_all(graph, t, parts)?)),
+
+        Condition::Not(inner) => Ok(Condition::Not(Box::new(checked(graph, t, *inner)?))),
+    }
+}
+
+
+fn checked_all(
+    graph: &Graph,
+    t: node_type::Id,
+    parts: Vec<Condition>,
+) -> Result<Vec<Condition>, String> {
+    parts
+        .into_iter()
+        .map(|part| checked(graph, t, part))
+        .collect()
+}
+
+
+fn value_of_kind(property: &Property, value: Value) -> Result<Value, String> {
+    use crate::core::Kind;
+
+    let name = &property.name;
+
+    match (property.kind, value) {
+        (Kind::String, value @ Value::Str(_)) | (Kind::Boolean, value @ Value::Bool(_)) => {
+            Ok(value)
+        }
+
+        (Kind::Date, Value::Str(text)) => crate::storage::property::parse_date(&text)
+            .map(|days| Value::Num(days as f64))
+            .ok_or_else(|| format!("{name}: not a date: {text}")),
+
+        (
+            Kind::Integer | Kind::Long | Kind::Double | Kind::Date | Kind::Timestamp,
+            value @ Value::Num(_),
+        ) => Ok(value),
+
+        (kind, _) => Err(format!(
+            "{name} is a {kind:?} property: wrong type of value"
+        )),
+    }
+}
+
+
 /// The yes/no list of `condition` for every node of type `t`, indexed by `node::Id`. Missing values never match.
 pub fn evaluate_packed(graph: &Graph, t: node_type::Id, condition: &Condition) -> Bitset {
     let n = graph.node_type_mappings.count(t) as usize;

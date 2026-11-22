@@ -80,6 +80,7 @@ pub fn load(dir: &Path, schema: &Schema) -> Result<Graph, Box<dyn std::error::Er
             .collect();
         node_types.push(node_type::Storage {
             name: spec.name.clone(),
+            primary_key: spec.primary_key.clone(),
             properties,
         });
     }

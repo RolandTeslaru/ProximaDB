@@ -9,6 +9,8 @@ use crate::storage::property::Property;
 /// One node type's stored data: its name and its property columns.
 pub struct Storage {
     pub name: String,
+    /// The property Quarry identifies this type's objects by; its values are the node keys.
+    pub primary_key: String,
     pub properties: Vec<Property>,
 }
 

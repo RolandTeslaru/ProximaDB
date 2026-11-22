@@ -14,6 +14,7 @@
 //!   threads. At most one read per core runs at a time; the rest wait their turn.
 //! - Writes (`writes`): actions go through a bounded queue to the writer thread. Each carries Quarry's sequence
 //!   number and is published whole. With no action for a while, the writer runs its idle check (rebuilds).
+//! - Cypher (`cypher`): a subset of Cypher, answered as a graph to draw and a count.
 //! - Read-your-writes: a read with `after: N` waits until action N is published.
 //!
 //! Every request is checked (`check`) before it reaches the engine: a release build aborts on a panic, so a wrong
@@ -24,6 +25,7 @@
 mod api;
 mod check;
 mod config;
+mod cypher;
 mod reads;
 mod schema;
 mod state;
@@ -125,6 +127,7 @@ fn router(state: Shared) -> Router {
         .route("/health", get(reads::health))
         .route("/reach", post(reads::reach))
         .route("/path", post(reads::path))
+        .route("/cypher", post(cypher::cypher))
         .route("/actions", post(writes::action))
         .with_state(state)
 }

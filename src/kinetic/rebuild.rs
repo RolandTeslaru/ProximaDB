@@ -74,6 +74,7 @@ pub fn rebuild(old: &Graph, ops: &[(u64, Op)]) -> Rebuilt {
         .iter_ids()
         .map(|(node_type, storage)| node_type::Storage {
             name: storage.name.clone(),
+            primary_key: storage.primary_key.clone(),
             properties: properties_of(old, &journal, &layout, node_type),
         })
         .collect();

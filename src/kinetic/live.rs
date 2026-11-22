@@ -292,6 +292,9 @@ pub struct TableRef<'a> {
     pub other_first: u64,
     /// The type of every node this table leads to (packed and side store alike).
     pub other_type: node_type::Id,
+    /// The link type the table belongs to, and whether it follows links forward ("follows") or backward.
+    pub link_type: link_type::Id,
+    pub forward: bool,
 }
 
 
@@ -382,6 +385,8 @@ impl<'a> View<'a> {
                     row_first: from_first,
                     other_first: to_first,
                     other_type: storage.to_type,
+                    link_type,
+                    forward: true,
                 });
             }
 
@@ -393,6 +398,8 @@ impl<'a> View<'a> {
                     row_first: to_first,
                     other_first: from_first,
                     other_type: storage.from_type,
+                    link_type,
+                    forward: false,
                 });
             }
         }
