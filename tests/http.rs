@@ -320,3 +320,22 @@ fn startup_errors_are_messages_not_crashes() {
         .unwrap();
     assert!(String::from_utf8_lossy(&output.stderr).contains("unknown argument"));
 }
+
+
+/// `docker stop` sends SIGTERM and kills the process if it hasn't exited after its grace period.
+#[test]
+fn stops_cleanly_on_sigterm() {
+    let mut server = Server::small();
+
+    // A connection open and idle, as a pool keeps them, mustn't hold the stop up.
+    let mut idle = server.client();
+    assert_eq!(idle.get("/health").status, 200);
+
+    let status = server
+        .terminate(Duration::from_secs(3))
+        .unwrap_or_else(|| panic!("still running 3 s after SIGTERM: {}", server.log()));
+
+    assert!(status.success(), "{status}: {}", server.log());
+    assert!(!server.socket.exists(), "the socket file was left behind");
+    assert!(server.log().contains("stopped"));
+}

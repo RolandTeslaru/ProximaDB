@@ -225,6 +225,27 @@ impl Server {
     }
 
 
+    /// Sends SIGTERM, as `docker stop` does, and waits up to `within` for the process to exit.
+    pub fn terminate(&mut self, within: Duration) -> Option<std::process::ExitStatus> {
+        Command::new("kill")
+            .args(["-TERM", &self.process.id().to_string()])
+            .status()
+            .unwrap();
+
+        let started = Instant::now();
+
+        while started.elapsed() < within {
+            if let Some(status) = self.process.try_wait().unwrap() {
+                return Some(status);
+            }
+
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        None
+    }
+
+
     pub fn is_alive(&mut self) -> bool {
         self.process.try_wait().unwrap().is_none()
     }

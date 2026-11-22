@@ -5,7 +5,7 @@
 //!   1. Read the command line (`config`) and the schema file (`schema`).
 //!   2. Load the graph from the data files into a `Store`.
 //!   3. Start the writer thread (`writes`): the one thread that applies actions.
-//!   4. Serve the routes on each listener.
+//!   4. Serve the routes on each listener, until SIGTERM or Ctrl-C: then finish the requests running and exit.
 //!
 //! While serving:
 //!
@@ -45,6 +45,7 @@ use axum::Router;
 use axum::routing::{get, post};
 use axum::serve::ListenerExt;
 use tokio::net::{TcpListener, UnixListener};
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -155,7 +156,8 @@ fn router(state: Shared) -> Router {
 }
 
 
-/// Serves on every configured listener until they all stop.
+/// Serves on every configured listener until SIGTERM (as `docker stop` sends) or Ctrl-C. Then every listener stops
+/// taking connections, requests already running finish, and the socket file is removed.
 fn serve(config: Config, app: Router) -> Result<(), String> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(HTTP_THREADS)
@@ -164,26 +166,62 @@ fn serve(config: Config, app: Router) -> Result<(), String> {
         .map_err(|e| format!("runtime: {e}"))?;
 
     runtime.block_on(async move {
+        let stopping = stop_signal()?;
         let mut servers = Vec::new();
 
         if let Some(path) = &config.unix_socket {
-            servers.push(serve_unix(path, app.clone())?);
+            servers.push(serve_unix(path, app.clone(), stopping.clone())?);
         }
 
         if let Some(address) = &config.tcp_address {
-            servers.push(serve_tcp(address, app).await?);
+            servers.push(serve_tcp(address, app, stopping).await?);
         }
 
         for server in servers {
             let _ = server.await;
         }
 
+        if let Some(path) = &config.unix_socket {
+            let _ = std::fs::remove_file(path);
+        }
+
+        eprintln!("stopped");
+
         Ok(())
     })
 }
 
 
-fn serve_unix(path: &Path, app: Router) -> Result<JoinHandle<std::io::Result<()>>, String> {
+/// Changes once SIGTERM or Ctrl-C arrives.
+fn stop_signal() -> Result<watch::Receiver<bool>, String> {
+    let mut terminate = signal(SignalKind::terminate()).map_err(|e| format!("signals: {e}"))?;
+    let (stop, stopping) = watch::channel(false);
+
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = terminate.recv() => {}
+            _ = tokio::signal::ctrl_c() => {}
+        }
+
+        eprintln!("stopping: finishing the requests already running");
+        let _ = stop.send(true);
+    });
+
+    Ok(stopping)
+}
+
+
+/// Waits for the stop signal; given to each listener as its graceful shutdown.
+async fn stopped(mut stopping: watch::Receiver<bool>) {
+    let _ = stopping.wait_for(|&stop| stop).await;
+}
+
+
+fn serve_unix(
+    path: &Path,
+    app: Router,
+    stopping: watch::Receiver<bool>,
+) -> Result<JoinHandle<std::io::Result<()>>, String> {
     // A socket file left by an earlier run would make the bind fail.
     let _ = std::fs::remove_file(path);
 
@@ -194,11 +232,17 @@ fn serve_unix(path: &Path, app: Router) -> Result<JoinHandle<std::io::Result<()>
 
     eprintln!("listening on unix:{}", path.display());
 
-    Ok(tokio::spawn(axum::serve(listener, app).into_future()))
+    let server = axum::serve(listener, app).with_graceful_shutdown(stopped(stopping));
+
+    Ok(tokio::spawn(server.into_future()))
 }
 
 
-async fn serve_tcp(address: &str, app: Router) -> Result<JoinHandle<std::io::Result<()>>, String> {
+async fn serve_tcp(
+    address: &str,
+    app: Router,
+    stopping: watch::Receiver<bool>,
+) -> Result<JoinHandle<std::io::Result<()>>, String> {
     let listener = TcpListener::bind(address)
         .await
         .map_err(|e| format!("bind {address}: {e}"))?
@@ -209,5 +253,7 @@ async fn serve_tcp(address: &str, app: Router) -> Result<JoinHandle<std::io::Res
 
     eprintln!("listening on http://{address}");
 
-    Ok(tokio::spawn(axum::serve(listener, app).into_future()))
+    let server = axum::serve(listener, app).with_graceful_shutdown(stopped(stopping));
+
+    Ok(tokio::spawn(server.into_future()))
 }
