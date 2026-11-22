@@ -35,6 +35,9 @@ struct Plan {
     max_steps: u32,
     end: Option<EndFilter>,
     through: Option<Through>,
+
+    /// `WHERE b <> a`: a start is never a match, even when a loop leads back to it.
+    skip_starts: bool,
 }
 
 
@@ -43,6 +46,9 @@ struct Plan {
 struct Conditions {
     start: Vec<Condition>,
     end: Vec<Condition>,
+
+    /// `b <> a` between the end and the start.
+    end_not_start: bool,
 }
 
 
@@ -80,7 +86,9 @@ pub fn run(
 
     counts_only_the_end(query)?;
 
-    let plan = resolve(view, starts, link, end_node, conditions.end, params)?;
+    let skip_starts = conditions.end_not_start;
+    let mut plan = resolve(view, starts, link, end_node, conditions.end, params)?;
+    plan.skip_starts = skip_starts;
 
     let wants_graph = query
         .returns
@@ -95,6 +103,7 @@ pub fn run(
             &plan.reach(&plan.starts),
             plan.min_steps,
             plan.end.as_ref(),
+            plan.skip_starts,
             limit,
         )
     });
@@ -199,6 +208,19 @@ fn split_where(query: &Query, params: &HashMap<String, Value>) -> Result<Conditi
     let end_name = query.step.as_ref().and_then(|(_, end)| end.name.as_deref());
 
     for part in conjuncts(expr) {
+        if let Expr::Different { left, right } = part {
+            let pair = [Some(left.as_str()), Some(right.as_str())];
+
+            if end_name.is_none() || !pair.contains(&start_name) || !pair.contains(&end_name) {
+                return Err(CypherError::plain(
+                    "<> between two nodes can only compare the start and the end, as in b <> a",
+                ));
+            }
+
+            conditions.end_not_start = true;
+            continue;
+        }
+
         let names = names_in(part);
 
         let [name] = names.as_slice() else {
@@ -241,6 +263,8 @@ fn conjuncts(expr: &Expr) -> Vec<&Expr> {
 fn names_in(expr: &Expr) -> Vec<&str> {
     let mut names = match expr {
         Expr::Compare { name, .. } | Expr::IsNull { name, .. } => vec![name.as_str()],
+
+        Expr::Different { left, right } => vec![left.as_str(), right.as_str()],
 
         Expr::And(left, right) | Expr::Or(left, right) => {
             let mut both = names_in(left);
@@ -444,6 +468,7 @@ fn resolve(
         max_steps,
         end,
         through,
+        skip_starts: false,
     })
 }
 
@@ -597,6 +622,13 @@ fn condition_for(
         ]),
 
         Expr::Not(inner) => Condition::Not(Box::new(condition_for(inner, name, place, params)?)),
+
+        // Only a part of WHERE joined by AND may compare two nodes; split_where takes those out first.
+        Expr::Different { .. } => {
+            return Err(CypherError::plain(format!(
+                "{place} can't compare two nodes inside OR or NOT; join b <> a with AND"
+            )));
+        }
     })
 }
 
@@ -621,7 +653,8 @@ fn evaluated(
 /// rest of the steps from there. Nodes nearer than `min_steps` don't count.
 fn count_matches(view: &View, plan: &Plan) -> u64 {
     let end = plan.end.as_ref();
-    let counts = |node: &&GlobalId| matches(view, end, **node);
+    let starts = starts_to_skip(plan);
+    let counts = |node: &&GlobalId| matches(view, end, **node) && !starts.contains(*node);
 
     let first = if plan.max_steps == 0 {
         Vec::new()
@@ -680,10 +713,22 @@ fn count_including_starts(view: &View, plan: &Plan, first: &[GlobalId]) -> u64 {
         found.extend(walk::reach(view, &rest).reached);
     }
 
+    let starts = starts_to_skip(plan);
+
     found
         .into_iter()
-        .filter(|&node| matches(view, plan.end.as_ref(), node))
+        .filter(|&node| matches(view, plan.end.as_ref(), node) && !starts.contains(&node))
         .count() as u64
+}
+
+
+/// The starts, when `b <> a` says they never count; otherwise nothing.
+fn starts_to_skip(plan: &Plan) -> rustc_hash::FxHashSet<GlobalId> {
+    if plan.skip_starts {
+        plan.starts.iter().copied().collect()
+    } else {
+        rustc_hash::FxHashSet::default()
+    }
 }
 
 

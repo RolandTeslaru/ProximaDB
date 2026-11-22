@@ -65,12 +65,13 @@ pub struct EndFilter {
 ///
 /// The starts aren't marked as seen before the first step, so a start reached from another start (or from itself,
 /// around a loop) counts like any other node. In the drawing, a start appears only if a match is reached from it,
-/// unless there is a single start, which always appears.
+/// unless there is a single start, which always appears. With `skip_starts`, a start is never a match.
 pub fn neighbourhood(
     view: &View,
     q: &Reach,
     min_steps: u32,
     end: Option<&EndFilter>,
+    skip_starts: bool,
     limit: usize,
 ) -> Subgraph {
     let tables = view.tables_by_type(q.link_types, q.direction);
@@ -82,7 +83,13 @@ pub fn neighbourhood(
     let mut matches = Vec::new();
     let mut truncated = false;
 
-    if min_steps == 0 {
+    let is_start: FxHashSet<GlobalId> = if skip_starts {
+        q.starts.iter().copied().collect()
+    } else {
+        FxHashSet::default()
+    };
+
+    if min_steps == 0 && !skip_starts {
         matches.extend(
             q.starts
                 .iter()
@@ -114,7 +121,7 @@ pub fn neighbourhood(
                 parent.insert(v, (u, link_of(table, u, v)));
                 queue.push_back((v, depth + 1));
 
-                if depth + 1 >= min_steps && is_match(view, end, v) {
+                if depth + 1 >= min_steps && is_match(view, end, v) && !is_start.contains(&v) {
                     matches.push(v);
                 }
 

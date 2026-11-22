@@ -68,6 +68,11 @@ pub enum Expr {
         property: String,
         negated: bool,
     },
+    /// `b <> a`: two nodes of the pattern are different nodes.
+    Different {
+        left: String,
+        right: String,
+    },
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
     Not(Box<Expr>),
@@ -566,6 +571,16 @@ impl Parser {
         }
 
         let name = self.name("a condition such as n.status = 'active'")?;
+
+        // `b <> a`, comparing two nodes, not a property with a value.
+        if *self.peek() == Token::Ne {
+            self.advance();
+
+            let right = self.name("the name of the other node, as in b <> a")?;
+
+            return Ok(Expr::Different { left: name, right });
+        }
+
         self.expect(Token::Dot, ". between the name and the property")?;
         let property = self.name("a property name")?;
 

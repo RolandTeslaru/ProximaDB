@@ -34,6 +34,7 @@ MATCH pattern [WHERE condition] RETURN item {, item} [LIMIT n]
 | length | none (one step), `*2`, `*1..4`, `*..6`, `*0..2` |
 | filter on the way | `(r, n \| n.status = 'active')`, inside the brackets |
 | condition | `=` `<>` `<` `<=` `>` `>=`, `IS NULL`, `IS NOT NULL`, with `AND`, `OR`, `NOT`, parentheses |
+| not the start | `WHERE b <> a`, joined to the rest with `AND` |
 | value | `'text'`, a number, `true`, `false`, `$parameter`; a date is `'2024-01-31'` |
 | return | a node, link or path name; `count(b)` |
 
@@ -132,6 +133,23 @@ MATCH p = shortestPath((a:Person {key: 'ana'})-[:FOLLOWS*..6 (r, n | n.status = 
 
 Answer: eve. The path is ana, ben, dan, eve.
 
+### Not the start
+
+With a loop, a walk can lead back to its start, and the start then counts like any other node, as in standard
+Cypher. With `ben → ana` added to the example graph:
+
+```cypher
+MATCH (a:Person {key: 'ana'})-[:FOLLOWS*1..3]->(b:Person) RETURN b
+```
+
+Answer: ana, ben, cleo, dan, eve.
+
+```cypher
+MATCH (a:Person {key: 'ana'})-[:FOLLOWS*1..3]->(b:Person) WHERE b <> a RETURN b
+```
+
+Answer: ben, cleo, dan, eve.
+
 ### Count
 
 ```cypher
@@ -183,7 +201,8 @@ Properties aren't returned. The caller fetches them from Quarry by type and key.
 | filter on the way | applies to each node type that has all the properties it names; **nodes of other types pass** |
 | filter in a shortest path | the two ends are exempt |
 | `shortestPath` | takes both ends by key, takes no `WHERE`, and ignores the minimum length |
-| `WHERE` | each part joined by `AND` is about one node, the start or the end |
+| `WHERE` | each part joined by `AND` is about one node, the start or the end, or is `b <> a` |
+| `b <> a` with many starts | the end is never any of the starts, not just the one it was reached from |
 | filtering the end | needs a label on the end node |
 
 The filter rule is what lets a filter pick out an intermediary object type (loans since 2025) without blocking the
