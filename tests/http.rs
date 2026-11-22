@@ -214,7 +214,6 @@ fn reload_replays_and_refuses_going_back() {
 #[test]
 fn bad_requests_never_stop_the_server() {
     let mut server = Server::small();
-    let mut client = server.client();
 
     let routes = ["/cypher", "/reach", "/path", "/actions", "/reload"];
     let bodies: [&[u8]; 9] = [
@@ -231,6 +230,8 @@ fn bad_requests_never_stop_the_server() {
 
     for route in routes {
         for body in bodies {
+            // After an error the server may close the connection, as HTTP allows: a fresh one for each.
+            let mut client = server.client();
             client.send("POST", route, Some("application/json"), body);
             let response = client.receive().unwrap();
 
@@ -242,11 +243,12 @@ fn bad_requests_never_stop_the_server() {
             );
         }
 
+        let mut client = server.client();
         client.send("POST", route, Some("text/plain"), b"{}");
         assert_eq!(client.receive().unwrap().status, 415, "{route}");
     }
 
-    assert_eq!(client.get("/nowhere").status, 404);
+    assert_eq!(server.client().get("/nowhere").status, 404);
     assert!(server.is_alive(), "{}", server.log());
 }
 

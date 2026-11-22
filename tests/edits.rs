@@ -333,6 +333,12 @@ fn random_edits_match_a_rebuild() {
                     }
                 }
                 w.commit();
+
+                // A rebuild counts once swapped in, at a commit after it finished: on a slow machine none may
+                // have by the end, so wait for the running one now and then.
+                if seq % 50 == 0 {
+                    w.finish_rebuild();
+                }
             }
         }
         // The rebuilt graph: deleted persons and their links gone.
