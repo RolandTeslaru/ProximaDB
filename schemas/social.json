@@ -1,0 +1,16 @@
+{
+  "node_types": [
+    {"name": "User", "file": "nodes_User.csv", "primary_key": "nodeId",
+     "properties": {"name": "string", "status": "string", "language": "string", "joined": "date", "posts": "integer",
+                    "sessions": "integer", "spent": "double", "banned": "boolean"}},
+    {"name": "Device", "file": "nodes_Device.csv", "primary_key": "nodeId",
+     "properties": {"name": "string", "os": "string", "firstSeen": "date", "sessions": "integer"}},
+    {"name": "Location", "file": "nodes_Location.csv", "primary_key": "nodeId", "properties": {"name": "string"}}
+  ],
+  "link_types": [
+    {"name": "FOLLOWS", "from_type": "User", "to_type": "User", "file": "edges_FOLLOWS__User__User.csv", "from_column": "src", "to_column": "dst"},
+    {"name": "USES", "from_type": "User", "to_type": "Device", "file": "edges_USES__User__Device.csv", "from_column": "src", "to_column": "dst"},
+    {"name": "SEEN_AT", "from_type": "Device", "to_type": "Location", "file": "edges_SEEN_AT__Device__Location.csv", "from_column": "src", "to_column": "dst"},
+    {"name": "LIVES_IN", "from_type": "User", "to_type": "Location", "file": "edges_LIVES_IN__User__Location.csv", "from_column": "src", "to_column": "dst"}
+  ]
+}
