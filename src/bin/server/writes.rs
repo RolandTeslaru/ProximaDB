@@ -157,6 +157,8 @@ impl WriterThread {
             ));
         }
 
+        let before = self.writer.generation().live.published();
+
         self.writer.replace(graph, as_of_seq);
 
         let later: Vec<ActionRequest> = self
@@ -174,10 +176,13 @@ impl WriterThread {
             }
         }
 
+        // A replayed action that no longer applies is still done: never answer with an older sequence than before.
+        self.writer.include_up_to(before.max(as_of_seq));
         self.writer.make_current();
 
         // The data holds the actions up to `as_of_seq`; the ones kept after it now sit on top.
         self.kept.retain(|action| action.seq > as_of_seq);
+        self.dropped_through = self.dropped_through.max(as_of_seq);
 
         let seq = self.writer.generation().live.published();
         let _ = self.published.send(seq);

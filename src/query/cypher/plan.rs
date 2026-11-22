@@ -60,7 +60,12 @@ pub fn run(
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT) as usize;
 
     let Some((link, end_node)) = &query.step else {
-        return Ok(nodes_only(&starts, limit));
+        let wants_graph = query
+            .returns
+            .iter()
+            .any(|item| matches!(item, ReturnItem::Name(_)));
+
+        return Ok(nodes_only(&starts, limit, wants_graph));
     };
 
     if query.shortest {
@@ -117,7 +122,7 @@ impl Plan {
 
 
 /// `MATCH (a…) RETURN a`: the nodes themselves.
-fn nodes_only(starts: &[GlobalId], limit: usize) -> Answer {
+fn nodes_only(starts: &[GlobalId], limit: usize, wants_graph: bool) -> Answer {
     let shown = starts
         .iter()
         .take(limit)
@@ -125,7 +130,7 @@ fn nodes_only(starts: &[GlobalId], limit: usize) -> Answer {
         .collect();
 
     Answer {
-        graph: Some(Subgraph {
+        graph: wants_graph.then_some(Subgraph {
             nodes: shown,
             links: Vec::new(),
             truncated: starts.len() > limit,
@@ -271,8 +276,13 @@ fn starts_of(
 
     let by_key = matches!(node.properties.as_slice(), [(name, _)] if name == primary_key);
 
-    if by_key && conditions.is_empty() {
-        return Ok(vec![find(view, node, params)?]);
+    if by_key {
+        let start = find(view, node, params)?;
+        let allowed = all_of(view, node_type, conditions)?;
+        let position = view.get(start).1.index();
+        let passes = allowed.is_none_or(|bits| bits.get(position));
+
+        return Ok(if passes { vec![start] } else { Vec::new() });
     }
 
     // Inline properties are equalities, like WHERE a.status = 'active'.
@@ -407,9 +417,7 @@ fn resolve(
         None => None,
     };
 
-    let filtered = !end_conditions.is_empty() || through_condition.is_some();
-
-    if filtered && end_type.is_none() {
+    if !end_conditions.is_empty() && end_type.is_none() {
         return Err(CypherError::plain(
             "label the end node to filter on its properties, e.g. (b:User)",
         ));
@@ -424,16 +432,9 @@ fn resolve(
         None => None,
     };
 
-    let through = match (through_condition, end_type) {
-        (Some(condition), Some(node_type)) => {
-            let mut through = Through::new(view.graph, false);
-            through.set(node_type, evaluated(view, node_type, condition)?);
-
-            Some(through)
-        }
-
-        _ => None,
-    };
+    let through = through_condition
+        .map(|condition| path_filter(view, condition))
+        .transpose()?;
 
     Ok(Plan {
         starts,
@@ -444,6 +445,41 @@ fn resolve(
         end,
         through,
     })
+}
+
+
+/// The inline `(r, n | …)` filter: evaluated over every node type that has the properties it names. Nodes of other
+/// types pass, so a filter on an intermediary type (`n.since >= …` on loans) leaves the people and things around it
+/// alone. A filter no node type can evaluate is an error.
+fn path_filter(view: &View, condition: Condition) -> Result<Through, CypherError> {
+    let graph = view.graph;
+    let mut through = Through::new(graph, true);
+    let mut applies_to_some = false;
+
+    let mut names = Vec::new();
+    condition::properties_in(&condition, &mut names);
+
+    for node_type in graph.node_types.ids() {
+        let has_them = names
+            .iter()
+            .all(|name| graph.property(node_type, name).is_some());
+
+        if !has_them {
+            continue;
+        }
+
+        through.set(node_type, evaluated(view, node_type, condition.clone())?);
+        applies_to_some = true;
+    }
+
+    if !applies_to_some {
+        return Err(CypherError::plain(format!(
+            "no node type has the link filter's properties: {}",
+            names.join(", ")
+        )));
+    }
+
+    Ok(through)
 }
 
 
@@ -587,7 +623,11 @@ fn count_matches(view: &View, plan: &Plan) -> u64 {
     let end = plan.end.as_ref();
     let counts = |node: &&GlobalId| matches(view, end, **node);
 
-    let first = walk::first_step(view, &plan.reach(&plan.starts));
+    let first = if plan.max_steps == 0 {
+        Vec::new()
+    } else {
+        walk::first_step(view, &plan.reach(&plan.starts))
+    };
 
     if plan.min_steps == 0 {
         return count_including_starts(view, plan, &first);
@@ -694,14 +734,9 @@ fn shortest_path(
 
     let through = match &link.filter {
         Some((name, expr)) => {
-            let label = end_node.label.as_deref().expect("find() required a label");
-            let node_type = node_type_named(view, label)?;
             let condition = condition_for(expr, Some(name), "the link's filter", params)?;
 
-            let mut through = Through::new(view.graph, false);
-            through.set(node_type, evaluated(view, node_type, condition)?);
-
-            Some(through)
+            Some(path_filter(view, condition)?)
         }
 
         None => None,

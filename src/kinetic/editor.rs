@@ -89,8 +89,17 @@ impl Editor {
     }
 
 
+    /// Publishes `seq` with no edits of its own, if it is ahead of the last published action.
+    pub fn publish_at_least(&mut self, seq: u64) {
+        if seq > self.live().published() {
+            self.seq = seq;
+            self.live().publish(seq);
+        }
+    }
+
+
     pub fn commit(&mut self) {
-        self.live().publish(self.nodes, self.seq);
+        self.live().publish(self.seq);
     }
 
 

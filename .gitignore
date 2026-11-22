@@ -5,3 +5,6 @@ __pycache__/
 
 # Rust build output
 /target/
+
+# Local design notes, kept out of the repository
+IDEAS.md

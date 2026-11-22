@@ -2,6 +2,10 @@
 
 use super::CypherError;
 
+/// The parser and the condition evaluator recurse over the query, so its length bounds the stack they need: a
+/// release build aborts on a stack overflow.
+const MAX_TOKENS: usize = 2_000;
+
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Token {
@@ -47,11 +51,14 @@ pub fn tokens(text: &str) -> Result<Vec<Spanned>, CypherError> {
     let mut at = 0;
 
     while at < bytes.len() {
-        let c = bytes[at] as char;
+        let c = text[at..]
+            .chars()
+            .next()
+            .expect("at is a character boundary below the end");
         let start = at;
 
         if c.is_whitespace() {
-            at += 1;
+            at += c.len_utf8();
             continue;
         }
 
@@ -90,7 +97,7 @@ pub fn tokens(text: &str) -> Result<Vec<Spanned>, CypherError> {
             }
 
             '$' => {
-                let width = word_width(bytes, at + 1);
+                let width = word_width(&text[at + 1..]);
 
                 if width == 0 {
                     return Err(CypherError::at(at, "a parameter needs a name after $"));
@@ -123,13 +130,20 @@ pub fn tokens(text: &str) -> Result<Vec<Spanned>, CypherError> {
             }
 
             c if c.is_alphabetic() || c == '_' => {
-                let width = word_width(bytes, at);
+                let width = word_width(&text[at..]);
 
                 (Token::Ident(text[at..at + width].to_string()), width)
             }
 
             other => return Err(CypherError::at(at, format!("unexpected character {other}"))),
         };
+
+        if out.len() == MAX_TOKENS {
+            return Err(CypherError::at(
+                start,
+                format!("a query has at most {MAX_TOKENS} words and symbols"),
+            ));
+        }
 
         out.push((token, start));
         at += width;
@@ -141,11 +155,11 @@ pub fn tokens(text: &str) -> Result<Vec<Spanned>, CypherError> {
 }
 
 
-fn word_width(bytes: &[u8], from: usize) -> usize {
-    bytes[from..]
-        .iter()
-        .take_while(|&&b| b.is_ascii_alphanumeric() || b == b'_')
-        .count()
+fn word_width(text: &str) -> usize {
+    text.chars()
+        .take_while(|&c| c.is_alphanumeric() || c == '_')
+        .map(char::len_utf8)
+        .sum()
 }
 
 

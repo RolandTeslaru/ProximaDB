@@ -183,8 +183,22 @@ pub(crate) fn through_for(
     }
 
     let mut through = Through::new(view.graph, others_allowed);
+    let mut by_type: Vec<(node_type::Id, Vec<Condition>)> = Vec::new();
 
+    // Two filters on one type both apply.
     for (node_type, condition) in filters {
+        match by_type.iter_mut().find(|(found, _)| *found == node_type) {
+            Some((_, conditions)) => conditions.push(condition),
+            None => by_type.push((node_type, vec![condition])),
+        }
+    }
+
+    for (node_type, mut conditions) in by_type {
+        let condition = match conditions.len() {
+            1 => conditions.pop().expect("one condition"),
+            _ => Condition::And(conditions),
+        };
+
         through.set(node_type, condition::evaluate(view, node_type, &condition));
     }
 
@@ -215,6 +229,7 @@ pub(crate) fn check_action(view: &View, edits: &[Edit]) -> Result<Vec<Checked>, 
     let mut checker = ActionChecker {
         view,
         added: HashSet::new(),
+        deleted: HashSet::new(),
     };
 
     edits
@@ -228,6 +243,8 @@ struct ActionChecker<'v, 'g> {
     view: &'v View<'g>,
     /// Nodes added by earlier edits of the same action, which later edits may name.
     added: HashSet<(node_type::Id, String)>,
+    /// Nodes deleted by earlier edits of the same action: later edits may add their key again, not name them.
+    deleted: HashSet<(node_type::Id, String)>,
 }
 
 
@@ -247,7 +264,11 @@ impl ActionChecker<'_, '_> {
             } => self.set_property(node, property, value),
 
             Edit::DeleteNode { node } => {
-                let (_, target) = self.target(node)?;
+                let (node_type, target) = self.target(node)?;
+                let named = (node_type, node.key.clone());
+
+                self.added.remove(&named);
+                self.deleted.insert(named);
 
                 Ok(Checked::DeleteNode(target))
             }
@@ -285,7 +306,14 @@ impl ActionChecker<'_, '_> {
         let node_type = node_type_of(graph, type_name)?;
         let new = (node_type, key.to_string());
 
-        if self.view.lookup(node_type, key.as_bytes()).is_some() || self.added.contains(&new) {
+        if key.is_empty() {
+            return Err(bad(format!("a {type_name} needs a key that isn't empty")));
+        }
+
+        let exists =
+            self.view.lookup(node_type, key.as_bytes()).is_some() && !self.deleted.contains(&new);
+
+        if exists || self.added.contains(&new) {
             return Err(bad(format!("{type_name} {key} already exists")));
         }
 
@@ -351,8 +379,17 @@ impl ActionChecker<'_, '_> {
     fn target(&self, node: &NodeRef) -> Result<(node_type::Id, Target), ApiError> {
         let node_type = node_type_of(self.view.graph, &node.node_type)?;
 
-        if self.added.contains(&(node_type, node.key.clone())) {
+        let named = (node_type, node.key.clone());
+
+        if self.added.contains(&named) {
             return Ok((node_type, Target::Added(node_type, node.key.clone())));
+        }
+
+        if self.deleted.contains(&named) {
+            return Err(bad(format!(
+                "{} {} was deleted earlier in this action",
+                node.node_type, node.key
+            )));
         }
 
         let existing = find(self.view, node)?;

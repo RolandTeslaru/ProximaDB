@@ -90,6 +90,7 @@ impl Store {
             link_limit: 0,
             node_limit: 0,
             building: None,
+            replacing: false,
             finished: Vec::new(),
         };
 
@@ -162,6 +163,8 @@ struct State {
     link_limit: u64,
     node_limit: u64,
     building: Option<Building>,
+    /// Between `replace` and `make_current`: no rebuild starts, since its swap would move searches early.
+    replacing: bool,
     finished: Vec<RebuildStats>,
 }
 
@@ -208,6 +211,10 @@ impl Writer<'_> {
 
 
     fn check(&mut self) {
+        if self.state.replacing {
+            return;
+        }
+
         match &self.state.building {
             Some(building) => {
                 if building.handle.is_finished() {
@@ -271,6 +278,7 @@ impl Writer<'_> {
         });
 
         self.state.editor = Editor::new(generation);
+        self.state.replacing = true;
         self.state.journal.clear();
         self.state.link_edits = 0;
         self.state.node_edits = 0;
@@ -279,8 +287,17 @@ impl Writer<'_> {
     }
 
 
+    /// Marks every action up to `seq` as included, when the graph already holds them all (as after a reload whose
+    /// last replayed actions no longer applied). Never moves the sequence back.
+    pub fn include_up_to(&mut self, seq: u64) {
+        self.state.editor.publish_at_least(seq);
+    }
+
+
     /// Makes the graph the writer works on the one new searches use (after `replace`).
     pub fn make_current(&mut self) {
+        self.state.replacing = false;
+
         *self
             .store
             .current
@@ -436,6 +453,10 @@ impl Writer<'_> {
 
         replay.apply(rest);
         replay.finish();
+
+        // Actions with no edits leave nothing to replay; the new generation still holds them.
+        let last = self.state.editor.generation().live.published();
+        replay.editor.publish_at_least(last);
 
         *self
             .store

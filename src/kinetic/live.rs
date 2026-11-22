@@ -51,7 +51,6 @@ struct NewKeys {
 
 pub struct Live {
     published: AtomicU64,
-    nodes: AtomicU64,
     any_changes: AtomicBool,
     any_deleted: AtomicBool,
     /// Nodes in the packed graph; added nodes are numbered from here.
@@ -62,6 +61,9 @@ pub struct Live {
     changed: GrowBitset,
     deleted: GrowBitset,
     new_nodes: BlockList<u64>,
+    /// The action that added each new node, in the same order. Increasing, so a view counts the new nodes it sees
+    /// from its own sequence number alone: one number, which can't be read half before and half after a publish.
+    new_seqs: BlockList<u64>,
     /// Per node type, the action that added each of its new nodes, in order.
     new_by_type: IndexVec<node_type::Id, BlockList<u64>>,
     new_keys: RwLock<NewKeys>,
@@ -130,7 +132,6 @@ impl Live {
 
         Self {
             published: AtomicU64::new(seq),
-            nodes: AtomicU64::new(graph.node_count() as u64),
             any_changes: AtomicBool::new(false),
             any_deleted: AtomicBool::new(false),
             base_nodes: graph.node_count() as u64,
@@ -139,6 +140,7 @@ impl Live {
             changed: GrowBitset::new(),
             deleted: GrowBitset::new(),
             new_nodes: BlockList::new(),
+            new_seqs: BlockList::new(),
             new_by_type: graph.node_types.iter().map(|_| BlockList::new()).collect(),
             new_keys: RwLock::new(NewKeys::default()),
             property_logs,
@@ -148,11 +150,13 @@ impl Live {
 
     /// A consistent view as of the last published action.
     pub fn view<'a>(&'a self, graph: &'a Graph) -> View<'a> {
+        let upto = self.published.load(Ordering::Acquire);
+
         View {
             graph,
             live: self,
-            upto: self.published.load(Ordering::Acquire),
-            nodes: self.nodes.load(Ordering::Acquire),
+            upto,
+            nodes: self.base_nodes + self.new_nodes_upto(upto),
             any_changes: self.any_changes.load(Ordering::Acquire),
             any_deleted: self.any_deleted.load(Ordering::Acquire),
         }
@@ -232,9 +236,27 @@ impl Live {
     // ---------------------------------------------------------------- the editor's writes
 
 
+    /// How many new nodes actions up to `upto` added: a binary search, since their actions only grow.
+    fn new_nodes_upto(&self, upto: u64) -> u64 {
+        let (mut low, mut high) = (0, self.new_seqs.len());
+
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let seq = self.new_seqs.get(middle).expect("below len");
+
+            if seq <= upto {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+
+        low
+    }
+
+
     /// Makes everything written since the last publish visible to new views at once.
-    pub(super) fn publish(&self, nodes: u64, seq: u64) {
-        self.nodes.store(nodes, Ordering::Release);
+    pub(super) fn publish(&self, seq: u64) {
         self.published.store(seq, Ordering::Release);
     }
 
@@ -250,6 +272,7 @@ impl Live {
         self.new_nodes
             .push(((node_type.0 as u64) << POSITION_BITS) | position);
         self.new_by_type[node_type].push(seq);
+        self.new_seqs.push(seq);
 
         let mut keys = self
             .new_keys
@@ -500,8 +523,11 @@ impl<'a> View<'a> {
             .key_index
             .get(&graph.keys, &graph.node_type_mappings, node_type, key);
 
-        if let Some(g) = packed {
-            return (!self.is_deleted(g)).then_some(g);
+        // A deleted node's key may have been given to a node added since.
+        if let Some(g) = packed
+            && !self.is_deleted(g)
+        {
+            return Some(g);
         }
 
         let keys = self

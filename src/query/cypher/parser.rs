@@ -9,6 +9,7 @@
 //! condition [NOT] name.property (= | <> | < | <= | > | >=) value | name.property IS [NOT] NULL,
 //!           combined with AND, OR, NOT and parentheses
 //! item      name | count([DISTINCT] name)
+//! TYPE      name {. name}: an intermediary object type gives NAME.a and NAME.b
 //! value     'text' | number | true | false | $parameter
 //! ```
 
@@ -17,6 +18,9 @@ use crate::query::condition::Op;
 
 use super::CypherError;
 use super::lexer::{Spanned, Token};
+
+/// How deep parentheses and NOT may nest in a condition: each level is a few recursive calls.
+const MAX_NESTING: usize = 64;
 
 
 #[derive(Debug)]
@@ -87,7 +91,11 @@ pub enum ReturnItem {
 
 
 pub fn parse(tokens: Vec<Spanned>) -> Result<Query, CypherError> {
-    let mut parser = Parser { tokens, at: 0 };
+    let mut parser = Parser {
+        tokens,
+        at: 0,
+        nesting: 0,
+    };
 
     parser.query()
 }
@@ -96,6 +104,7 @@ pub fn parse(tokens: Vec<Spanned>) -> Result<Query, CypherError> {
 struct Parser {
     tokens: Vec<Spanned>,
     at: usize,
+    nesting: usize,
 }
 
 
@@ -354,7 +363,7 @@ impl Parser {
 
         if *self.peek() == Token::Colon {
             self.advance();
-            types.push(self.name("a link type after :")?);
+            types.push(self.link_type_name("a link type after :")?);
 
             while *self.peek() == Token::Pipe {
                 self.advance();
@@ -363,7 +372,7 @@ impl Parser {
                     self.advance();
                 }
 
-                types.push(self.name("a link type after |")?);
+                types.push(self.link_type_name("a link type after |")?);
             }
         }
 
@@ -405,10 +414,25 @@ impl Parser {
     }
 
 
+    /// A link type's name, which may contain dots: an intermediary object type's link types are `NAME.a` and
+    /// `NAME.b`.
+    fn link_type_name(&mut self, what: &str) -> Result<String, CypherError> {
+        let mut name = self.name(what)?;
+
+        while *self.peek() == Token::Dot {
+            self.advance();
+            name.push('.');
+            name.push_str(&self.name("the rest of the link type's name after .")?);
+        }
+
+        Ok(name)
+    }
+
+
     /// After `*`: `[min]..max`, `min..`, `n` (exactly n), or nothing.
     fn length(&mut self) -> Result<(u32, Option<u32>), CypherError> {
         let min = match self.peek() {
-            Token::Num(_) => Some(self.number("a length")? as u32),
+            Token::Num(_) => Some(self.number("a length")?.min(u32::MAX as u64) as u32),
             _ => None,
         };
 
@@ -422,7 +446,7 @@ impl Parser {
         self.advance();
 
         let max = match self.peek() {
-            Token::Num(_) => Some(self.number("a length")? as u32),
+            Token::Num(_) => Some(self.number("a length")?.min(u32::MAX as u64) as u32),
             _ => None,
         };
 
@@ -506,17 +530,36 @@ impl Parser {
     fn not(&mut self) -> Result<Expr, CypherError> {
         if self.at_keyword("NOT") {
             self.advance();
-            return Ok(Expr::Not(Box::new(self.not()?)));
+
+            let inner = self.nested(Self::not)?;
+
+            return Ok(Expr::Not(Box::new(inner)));
         }
 
         self.atom()
     }
 
 
+    fn nested(
+        &mut self,
+        parse: fn(&mut Self) -> Result<Expr, CypherError>,
+    ) -> Result<Expr, CypherError> {
+        if self.nesting == MAX_NESTING {
+            return self.error(format!("a condition nests at most {MAX_NESTING} deep"));
+        }
+
+        self.nesting += 1;
+        let inner = parse(self);
+        self.nesting -= 1;
+
+        inner
+    }
+
+
     fn atom(&mut self) -> Result<Expr, CypherError> {
         if *self.peek() == Token::LParen {
             self.advance();
-            let inner = self.expr()?;
+            let inner = self.nested(Self::expr)?;
             self.expect(Token::RParen, ")")?;
 
             return Ok(inner);

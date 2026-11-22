@@ -1,6 +1,6 @@
 #![feature(portable_simd)]
 
-//! ProximaDB: an in-memory index of Quarry's links for deep link questions. See IDEAS.md for the design.
+//! ProximaDB: an in-memory index of Quarry's links for deep link questions. See docs/how-it-works.md for the design.
 
 pub mod collections;
 pub mod core;

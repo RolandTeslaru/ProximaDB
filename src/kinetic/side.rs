@@ -150,7 +150,10 @@ impl SideTable {
             for k in 0..n {
                 // Safety: k < count, so the entry was fully written.
                 let e = unsafe { (*chunk.entries[k].get()).assume_init() };
-                if e.seq <= upto && chunk.removed[k].load(Ordering::Acquire) > upto {
+                let removed = chunk.removed[k].load(Ordering::Acquire);
+
+                // NONE is u64::MAX, which is also a valid sequence number: compare it apart.
+                if e.seq <= upto && (removed == NONE || removed > upto) {
                     f(e.target, e.link);
                 }
             }

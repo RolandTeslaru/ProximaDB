@@ -359,7 +359,7 @@ fn compare_value(op: Op, a: &Val, b: &Value) -> bool {
     }
 }
 
-fn properties_in(c: &Condition, out: &mut Vec<String>) {
+pub(crate) fn properties_in(c: &Condition, out: &mut Vec<String>) {
     match c {
         Condition::Compare { property, .. } | Condition::HasValue(property) => {
             out.push(property.clone())

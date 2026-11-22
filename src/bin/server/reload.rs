@@ -59,11 +59,30 @@ pub(crate) async fn reload(
         ));
     }
 
-    let result = reload_and_swap(&state, request.as_of_seq).await;
+    // Its own task: a client that stops waiting doesn't stop the reload halfway, and the flag clears either way.
+    let task = tokio::spawn(async move {
+        let _running = Running(state.clone());
 
-    state.reloading.store(false, Ordering::Release);
+        reload_and_swap(&state, request.as_of_seq).await
+    });
 
-    result
+    task.await.map_err(|e| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("the reload stopped: {e}"),
+        )
+    })?
+}
+
+
+/// Clears the "reload running" flag when dropped, however the reload ends.
+struct Running(Shared);
+
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.0.reloading.store(false, Ordering::Release);
+    }
 }
 
 

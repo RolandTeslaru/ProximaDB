@@ -343,3 +343,68 @@ fn starting_from_every_node_that_matches() {
     );
     assert_eq!(with_self.count, Some(2));
 }
+
+
+#[test]
+fn hostile_text_is_an_error_not_a_crash() {
+    let g = graph();
+
+    let unicode = run(&g, "MATCH (é:Person {key: 'ana'}) RETURN é");
+    assert_eq!(unicode.count, Some(1));
+
+    let parens = format!(
+        "MATCH (a:Person) WHERE {}a.age = 1{} RETURN a",
+        "(".repeat(100),
+        ")".repeat(100)
+    );
+    assert!(error(&g, &parens).contains("nests at most"));
+
+    let nots = format!(
+        "MATCH (a:Person) WHERE {}a.age = 1 RETURN a",
+        "NOT ".repeat(100)
+    );
+    assert!(error(&g, &nots).contains("nests at most"));
+
+    let long = format!(
+        "MATCH (a:Person) WHERE {}a.age = 1 RETURN a",
+        "a.age = 1 AND ".repeat(100_000)
+    );
+    assert!(error(&g, &long).contains("words and symbols"));
+
+    // Just inside both limits still runs, on a test thread's small stack.
+    let chain = "a.age = 1 OR ".repeat(300);
+    let deep = format!(
+        "MATCH (a:Person) WHERE {}{chain}a.age = 30{} RETURN a",
+        "(".repeat(60),
+        ")".repeat(60)
+    );
+    assert_eq!(run(&g, &deep).count, Some(1));
+}
+
+
+#[test]
+fn counts_keys_and_length_zero() {
+    let g = graph();
+
+    let alone = run(&g, "MATCH (a:Person) RETURN count(a)");
+    assert_eq!(alone.count, Some(5));
+    assert!(alone.graph.is_none(), "a count alone draws nothing");
+
+    let itself = run(
+        &g,
+        "MATCH (a:Person {key: 'ana'})-[:FOLLOWS*0..0]->(b:Person) RETURN count(b)",
+    );
+    assert_eq!(itself.count, Some(1));
+
+    let passes = run(
+        &g,
+        "MATCH (a:Person {key: 'ana'}) WHERE a.age = 30 RETURN a",
+    );
+    assert_eq!(passes.count, Some(1));
+
+    let fails = run(
+        &g,
+        "MATCH (a:Person {key: 'ana'}) WHERE a.age = 31 RETURN a",
+    );
+    assert_eq!(fails.count, Some(0));
+}

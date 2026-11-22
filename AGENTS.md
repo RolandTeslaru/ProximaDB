@@ -104,6 +104,6 @@ Trust the code you call. Write only what the code has to do.
 
 ## Before writing
 
-- Read the neighbouring code end to end and `IDEAS.md` for the domain.
+- Read the neighbouring code end to end, and `docs/how-it-works.md` for the design.
 - Before a structural change, say what moves where and why the current layout falls short.
 - Don't add an abstraction because it is easy to write; say what problem it solves.
