@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 use crate::core::Value;
 use crate::core::link;
 use crate::core::node;
+use crate::kinetic::draft::{Draft, Generation};
 use crate::kinetic::editor::Editor;
-use crate::kinetic::live::{Generation, Live};
 use crate::kinetic::rebuild::{self, NONE, Op, Rebuilt};
 use crate::storage::graph::Graph;
 use crate::storage::link_type;
@@ -273,7 +273,7 @@ impl Writer<'_> {
         }
 
         let generation = Arc::new(Generation {
-            live: Live::starting_at(&graph, as_of_seq),
+            draft: Draft::starting_at(&graph, as_of_seq),
             graph,
         });
 
@@ -410,7 +410,7 @@ impl Writer<'_> {
         let ops = std::mem::take(&mut self.state.journal);
         let old = self.state.editor.generation().clone();
         // The journal ends here: the new generation starts as of this action.
-        let seq = old.live.published();
+        let seq = old.draft.published();
         let backlog: Arc<Mutex<Ops>> = Arc::default();
 
         let thread_backlog = backlog.clone();
@@ -455,7 +455,7 @@ impl Writer<'_> {
         replay.finish();
 
         // Actions with no edits leave nothing to replay; the new generation still holds them.
-        let last = self.state.editor.generation().live.published();
+        let last = self.state.editor.generation().draft.published();
         replay.editor.publish_at_least(last);
 
         *self
@@ -540,7 +540,7 @@ fn build_and_catch_up(
     let catch_up_started = Instant::now();
 
     let generation = Arc::new(Generation {
-        live: Live::starting_at(&graph, seq),
+        draft: Draft::starting_at(&graph, seq),
         graph,
     });
 

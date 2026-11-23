@@ -14,7 +14,7 @@ use proximadb::core::{Kind, Value};
 use proximadb::load::{self, Backing, LinkTypeSpec, NodeTypeSpec, Schema, Side};
 use proximadb::query::condition::{self, Condition, Op};
 use proximadb::storage::node_type::Id as TypeId;
-use proximadb::{Graph, Live, Store};
+use proximadb::{Draft, Graph, Store};
 
 const PERSON: TypeId = TypeId(0);
 const DAY_2024_02_29: i32 = 19_782;
@@ -45,9 +45,9 @@ fn find(graph: &Graph, key: &str) -> bool {
 fn matching(graph: &Graph, property: &str, value: Value) -> u64 {
     let condition = Condition::compare(property, Op::Eq, value);
     let condition = condition::checked(graph, PERSON, condition).unwrap();
-    let live = Live::new(graph);
+    let draft = Draft::new(graph);
 
-    condition::evaluate(&live.view(graph), PERSON, &condition).count()
+    condition::evaluate(&draft.view(graph), PERSON, &condition).count()
 }
 
 

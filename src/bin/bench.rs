@@ -94,8 +94,8 @@ fn main() {
     let load_s = started.elapsed().as_secs_f64();
     let peak = peak_rss_bytes();
 
-    let live = proximadb::Live::new(&graph);
-    let view = live.view(&graph);
+    let draft = proximadb::Draft::new(&graph);
+    let view = draft.view(&graph);
     let params: Json =
         serde_json::from_str(&std::fs::read_to_string(dir.join("params.json")).unwrap()).unwrap();
     let expected: Json =

@@ -11,7 +11,7 @@ use proximadb::core::node::GlobalId;
 use proximadb::load::{self, Backing, LinkTypeSpec, NodeTypeSpec, Schema};
 use proximadb::query::condition::{self, Condition, Op, Value};
 use proximadb::query::walk::{self, Reach, Through};
-use proximadb::{Live, Store, View};
+use proximadb::{Draft, Store, View};
 
 struct Rng(u64);
 impl Rng {
@@ -199,7 +199,7 @@ fn answers(view: &View, start: GlobalId) -> Vec<BTreeSet<Vec<u8>>> {
 }
 
 fn compare(view: &View, fresh: &Graph, model: &Model, rng: &mut Rng, label: &str) {
-    let fresh_live = Live::new(fresh);
+    let fresh_live = Draft::new(fresh);
     let fv = fresh_live.view(fresh);
     let keys: Vec<&String> = model.persons.keys().collect();
     for _ in 0..40 {
@@ -368,7 +368,7 @@ fn random_edits_match_a_rebuild() {
         // Everything folded into the packed graph.
         w.rebuild_and_wait();
         let generation = store.current();
-        assert_eq!(generation.live.side_chunks(), 0);
+        assert_eq!(generation.draft.side_chunks(), 0);
         compare(
             &generation.view(),
             &fresh,
@@ -453,7 +453,7 @@ fn a_search_never_sees_half_an_action() {
     let g3 = store.current();
     let now = g3.view();
     assert_eq!(
-        now.live.side_chunks(),
+        now.draft.side_chunks(),
         0,
         "the new generation has the link packed"
     );
@@ -505,7 +505,7 @@ fn an_idle_writer_still_rebuilds() {
     assert_eq!(store.rebuilds(), 1);
     let g = store.current();
     let v = g.view();
-    assert_eq!(v.live.side_chunks(), 0, "all six links are packed");
+    assert_eq!(v.draft.side_chunks(), 0, "all six links are packed");
     let (a2, b2) = (
         node(&v, "Person", "p0").unwrap(),
         node(&v, "Person", "p1").unwrap(),

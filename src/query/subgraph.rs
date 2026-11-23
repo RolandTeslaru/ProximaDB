@@ -16,7 +16,7 @@ use crate::collections::bitset::Bitset;
 use crate::collections::index_vec::IndexVec;
 use crate::core::Direction;
 use crate::core::node::GlobalId;
-use crate::kinetic::live::{TableRef, View};
+use crate::kinetic::draft::{TableRef, View};
 use crate::query::walk::{Reach, Through, reverse};
 use crate::storage::link_type;
 use crate::storage::node_type;
