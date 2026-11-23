@@ -1,5 +1,4 @@
-# Tests every pull request and every push to master or dev. Work collects on dev; master gets it in one pull request,
-# when it is released.
+# Tests every pull request and every push to master.
 #
 # A version tag (v0.1.0) on a commit of master that passes the tests releases it:
 #   - the server image for linux/amd64 and linux/arm64, as ghcr.io/rolandteslaru/proximadb:0.1.0 and :latest;
@@ -9,7 +8,7 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [master, dev]
+    branches: [master]
     tags: ["v*"]
 
 permissions:
