@@ -62,6 +62,7 @@ The server has no authentication: keep it on loopback or a private network.
 | Page | Covers |
 |---|---|
 | [How it works](docs/how-it-works.md) | storage, edits and views, rebuilds, walks, measurements |
+| [The kinetic layer](docs/kinetic.md) | how an action is applied, read, rebuilt and reloaded, step by step |
 | [HTTP API](docs/http-api.md) | running the server, every route, errors, connecting from Quarry |
 | [Cypher](docs/cypher.md) | what queries are supported and what they return |
 | [Getting data in](docs/data.md) | the schema file, link backings, actions, reloads |
