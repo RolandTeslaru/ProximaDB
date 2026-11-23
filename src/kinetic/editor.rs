@@ -180,7 +180,7 @@ impl Editor {
             let mut tail = self.tails[link_type][side].get(&node.0).copied();
 
             self.draft()
-                .side(link_type, side)
+                .added_links(link_type, side)
                 .push(node, entry, &mut tail);
 
             if let Some(chunk) = tail {
@@ -211,8 +211,8 @@ impl Editor {
             (FORWARD, &storage.forward, from, to),
             (BACKWARD, &storage.backward, to, from),
         ] {
-            let removed_bits = self.draft().removed(link_type, side);
-            let side_table = self.draft().side(link_type, side);
+            let removed_bits = self.draft().removed_links(link_type, side);
+            let side_table = self.draft().added_links(link_type, side);
 
             let removed = self.remove_packed(table, removed_bits, node, other)
                 || side_table.remove(node, other, self.seq).is_some();
@@ -235,9 +235,9 @@ impl Editor {
         node: node::GlobalId,
         other: node::GlobalId,
     ) -> bool {
-        let base_nodes = self.draft().base_nodes();
+        let frozen_nodes = self.draft().frozen_nodes();
 
-        if node.0 >= base_nodes || other.0 >= base_nodes {
+        if node.0 >= frozen_nodes || other.0 >= frozen_nodes {
             return false;
         }
 

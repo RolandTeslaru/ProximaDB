@@ -50,24 +50,47 @@ struct NewKeys {
 
 
 pub struct Draft {
+    /// The last action searches may see.
     published: AtomicU64,
-    any_changes: AtomicBool,
-    any_deleted: AtomicBool,
-    /// Nodes in the packed graph; added nodes are numbered from here.
-    base_nodes: u64,
-    /// Per link type, `[FORWARD]` for "follows" and `[BACKWARD]` for "followed by".
-    side: IndexVec<link_type::Id, [SideTable; 2]>,
-    removed: IndexVec<link_type::Id, [AtomicBitset; 2]>,
-    changed: GrowBitset,
-    deleted: GrowBitset,
-    new_nodes: BlockList<u64>,
+    frozen: Frozen,
+    added: Added,
+    marks: Marks,
+    /// Per node type and property, the changes since the graph was frozen, of frozen and added nodes alike.
+    property_logs: IndexVec<node_type::Id, Vec<PropertyLog>>,
+}
+
+
+/// About the frozen packed graph: its size, and what was removed from it.
+struct Frozen {
+    /// Nodes in the frozen graph; added nodes are numbered from here.
+    nodes: u64,
+    /// Per link type, `[FORWARD]` and `[BACKWARD]`: a bit per packed link, set when it was removed.
+    removed_links: IndexVec<link_type::Id, [AtomicBitset; 2]>,
+}
+
+
+/// What actions added since the graph was frozen.
+struct Added {
+    /// Each added node's type and position.
+    nodes: BlockList<u64>,
     /// The action that added each new node, in the same order. Increasing, so a view counts the new nodes it sees
     /// from its own sequence number alone: one number, which can't be read half before and half after a publish.
-    new_seqs: BlockList<u64>,
+    node_seqs: BlockList<u64>,
     /// Per node type, the action that added each of its new nodes, in order.
-    new_by_type: IndexVec<node_type::Id, BlockList<u64>>,
-    new_keys: RwLock<NewKeys>,
-    property_logs: IndexVec<node_type::Id, Vec<PropertyLog>>,
+    by_type: IndexVec<node_type::Id, BlockList<u64>>,
+    keys: RwLock<NewKeys>,
+    /// Per link type, `[FORWARD]` for "follows" and `[BACKWARD]` for "followed by".
+    links: IndexVec<link_type::Id, [SideTable; 2]>,
+}
+
+
+/// The bits walks check per node, and whether any is set at all.
+struct Marks {
+    /// Nodes whose links changed: walks read their removed bits and added links.
+    changed: GrowBitset,
+    deleted: GrowBitset,
+    any_changes: AtomicBool,
+    any_deleted: AtomicBool,
 }
 
 
@@ -101,13 +124,13 @@ impl Draft {
 
     /// No edits yet, with everything up to action `seq` already in the packed graph.
     pub fn starting_at(graph: &Graph, seq: u64) -> Self {
-        let side = graph
+        let links = graph
             .link_types
             .iter()
             .map(|_| [SideTable::new(), SideTable::new()])
             .collect();
 
-        let removed = graph
+        let removed_links = graph
             .link_types
             .iter()
             .map(|storage| {
@@ -132,17 +155,23 @@ impl Draft {
 
         Self {
             published: AtomicU64::new(seq),
-            any_changes: AtomicBool::new(false),
-            any_deleted: AtomicBool::new(false),
-            base_nodes: graph.node_count() as u64,
-            side,
-            removed,
-            changed: GrowBitset::new(),
-            deleted: GrowBitset::new(),
-            new_nodes: BlockList::new(),
-            new_seqs: BlockList::new(),
-            new_by_type: graph.node_types.iter().map(|_| BlockList::new()).collect(),
-            new_keys: RwLock::new(NewKeys::default()),
+            frozen: Frozen {
+                nodes: graph.node_count() as u64,
+                removed_links,
+            },
+            added: Added {
+                nodes: BlockList::new(),
+                node_seqs: BlockList::new(),
+                by_type: graph.node_types.iter().map(|_| BlockList::new()).collect(),
+                keys: RwLock::new(NewKeys::default()),
+                links,
+            },
+            marks: Marks {
+                changed: GrowBitset::new(),
+                deleted: GrowBitset::new(),
+                any_changes: AtomicBool::new(false),
+                any_deleted: AtomicBool::new(false),
+            },
             property_logs,
         }
     }
@@ -156,9 +185,9 @@ impl Draft {
             graph,
             draft: self,
             upto,
-            nodes: self.base_nodes + self.new_nodes_upto(upto),
-            any_changes: self.any_changes.load(Ordering::Acquire),
-            any_deleted: self.any_deleted.load(Ordering::Acquire),
+            nodes: self.frozen.nodes + self.added_nodes_upto(upto),
+            any_changes: self.marks.any_changes.load(Ordering::Acquire),
+            any_deleted: self.marks.any_deleted.load(Ordering::Acquire),
         }
     }
 
@@ -169,10 +198,17 @@ impl Draft {
 
 
     pub fn bytes(&self) -> usize {
-        let side: usize = self.side.iter().flatten().map(SideTable::bytes).sum();
+        let side: usize = self
+            .added
+            .links
+            .iter()
+            .flatten()
+            .map(SideTable::bytes)
+            .sum();
 
         let removed: usize = self
-            .removed
+            .frozen
+            .removed_links
             .iter()
             .flatten()
             .map(|bits| bits.word_count() * 8)
@@ -185,25 +221,35 @@ impl Draft {
             .map(|log| log.log.bytes())
             .sum();
 
-        side + removed + self.changed.bytes() + self.deleted.bytes() + self.new_nodes.bytes() + logs
+        side + removed
+            + self.marks.changed.bytes()
+            + self.marks.deleted.bytes()
+            + self.added.nodes.bytes()
+            + logs
     }
 
 
     pub fn side_chunks(&self) -> u64 {
-        self.side.iter().flatten().map(SideTable::chunks).sum()
+        self.added
+            .links
+            .iter()
+            .flatten()
+            .map(SideTable::chunks)
+            .sum()
     }
 
 
     /// A node's type and its position within that type, packed or added since the rebuild.
     #[inline]
     pub(crate) fn node(&self, graph: &Graph, g: node::GlobalId) -> (node_type::Id, node::Id) {
-        if g.0 < self.base_nodes {
+        if g.0 < self.frozen.nodes {
             return graph.node_type_mappings.get(g);
         }
 
         let entry = self
-            .new_nodes
-            .get(g.0 - self.base_nodes)
+            .added
+            .nodes
+            .get(g.0 - self.frozen.nodes)
             .expect("every node below the published count has an entry");
 
         (
@@ -218,18 +264,18 @@ impl Draft {
     }
 
 
-    pub(super) fn base_nodes(&self) -> u64 {
-        self.base_nodes
+    pub(super) fn frozen_nodes(&self) -> u64 {
+        self.frozen.nodes
     }
 
 
-    pub(super) fn side(&self, link_type: link_type::Id, side: usize) -> &SideTable {
-        &self.side[link_type][side]
+    pub(super) fn added_links(&self, link_type: link_type::Id, side: usize) -> &SideTable {
+        &self.added.links[link_type][side]
     }
 
 
-    pub(super) fn removed(&self, link_type: link_type::Id, side: usize) -> &AtomicBitset {
-        &self.removed[link_type][side]
+    pub(super) fn removed_links(&self, link_type: link_type::Id, side: usize) -> &AtomicBitset {
+        &self.frozen.removed_links[link_type][side]
     }
 
 
@@ -237,12 +283,12 @@ impl Draft {
 
 
     /// How many new nodes actions up to `upto` added: a binary search, since their actions only grow.
-    fn new_nodes_upto(&self, upto: u64) -> u64 {
-        let (mut low, mut high) = (0, self.new_seqs.len());
+    fn added_nodes_upto(&self, upto: u64) -> u64 {
+        let (mut low, mut high) = (0, self.added.node_seqs.len());
 
         while low < high {
             let middle = low + (high - low) / 2;
-            let seq = self.new_seqs.get(middle).expect("below len");
+            let seq = self.added.node_seqs.get(middle).expect("below len");
 
             if seq <= upto {
                 low = middle + 1;
@@ -269,13 +315,15 @@ impl Draft {
         key: &[u8],
         seq: u64,
     ) {
-        self.new_nodes
+        self.added
+            .nodes
             .push(((node_type.0 as u64) << POSITION_BITS) | position);
-        self.new_by_type[node_type].push(seq);
-        self.new_seqs.push(seq);
+        self.added.by_type[node_type].push(seq);
+        self.added.node_seqs.push(seq);
 
         let mut keys = self
-            .new_keys
+            .added
+            .keys
             .write()
             .expect("no writer panics holding the lock");
 
@@ -290,15 +338,15 @@ impl Draft {
 
 
     pub(super) fn delete(&self, node: node::GlobalId) {
-        self.deleted.set(node.0);
-        self.any_deleted.store(true, Ordering::Release);
+        self.marks.deleted.set(node.0);
+        self.marks.any_deleted.store(true, Ordering::Release);
     }
 
 
     /// Marks a node whose links changed, so walks read its removed bits and side-store entries.
     pub(super) fn mark_changed(&self, node: node::GlobalId) {
-        self.changed.set(node.0);
-        self.any_changes.store(true, Ordering::Release);
+        self.marks.changed.set(node.0);
+        self.marks.any_changes.store(true, Ordering::Release);
     }
 }
 
@@ -362,7 +410,7 @@ impl<'a> View<'a> {
     /// Position within `node_type` of node `g`, which must be of that type. No type lookup for packed nodes.
     #[inline]
     pub fn position(&self, node_type: node_type::Id, g: node::GlobalId) -> node::Id {
-        if g.0 < self.draft.base_nodes {
+        if g.0 < self.draft.frozen.nodes {
             return self.graph.node_type_mappings.position(node_type, g);
         }
 
@@ -372,7 +420,7 @@ impl<'a> View<'a> {
 
     #[inline]
     pub fn type_of(&self, g: node::GlobalId) -> node_type::Id {
-        if g.0 < self.draft.base_nodes {
+        if g.0 < self.draft.frozen.nodes {
             return self.graph.node_type_mappings.type_of(g);
         }
 
@@ -382,7 +430,7 @@ impl<'a> View<'a> {
 
     #[inline]
     pub fn is_deleted(&self, g: node::GlobalId) -> bool {
-        self.any_deleted && self.draft.deleted.get(g.0)
+        self.any_deleted && self.draft.marks.deleted.get(g.0)
     }
 
 
@@ -403,8 +451,8 @@ impl<'a> View<'a> {
             if matches!(direction, Direction::Forward | Direction::Both) {
                 tables[storage.from_type].push(TableRef {
                     base: &storage.forward,
-                    side: self.draft.side(link_type, FORWARD),
-                    removed: self.draft.removed(link_type, FORWARD),
+                    side: self.draft.added_links(link_type, FORWARD),
+                    removed: self.draft.removed_links(link_type, FORWARD),
                     row_first: from_first,
                     other_first: to_first,
                     other_type: storage.to_type,
@@ -416,8 +464,8 @@ impl<'a> View<'a> {
             if matches!(direction, Direction::Backward | Direction::Both) {
                 tables[storage.to_type].push(TableRef {
                     base: &storage.backward,
-                    side: self.draft.side(link_type, BACKWARD),
-                    removed: self.draft.removed(link_type, BACKWARD),
+                    side: self.draft.added_links(link_type, BACKWARD),
+                    removed: self.draft.removed_links(link_type, BACKWARD),
                     row_first: to_first,
                     other_first: from_first,
                     other_type: storage.from_type,
@@ -433,7 +481,7 @@ impl<'a> View<'a> {
 
     #[inline]
     fn changed(&self, u: node::GlobalId) -> bool {
-        self.any_changes && self.draft.changed.get(u.0)
+        self.any_changes && self.draft.marks.changed.get(u.0)
     }
 
 
@@ -442,7 +490,7 @@ impl<'a> View<'a> {
     pub fn for_each(&self, table: &TableRef, u: node::GlobalId, mut f: impl FnMut(node::GlobalId)) {
         let changed = self.changed(u);
 
-        if u.0 < self.draft.base_nodes {
+        if u.0 < self.draft.frozen.nodes {
             let range = table.base.range(table.row(u));
 
             if changed {
@@ -475,7 +523,7 @@ impl<'a> View<'a> {
     ) -> bool {
         let changed = self.changed(u);
 
-        if u.0 < self.draft.base_nodes {
+        if u.0 < self.draft.frozen.nodes {
             for position in table.base.range(table.row(u)) {
                 *checked += 1;
 
@@ -508,7 +556,7 @@ impl<'a> View<'a> {
     /// Links of `u` in the packed part of this table (added links aren't counted).
     #[inline]
     pub fn degree(&self, table: &TableRef, u: node::GlobalId) -> u64 {
-        if u.0 < self.draft.base_nodes {
+        if u.0 < self.draft.frozen.nodes {
             return table.base.degree(table.row(u));
         }
 
@@ -532,7 +580,8 @@ impl<'a> View<'a> {
 
         let keys = self
             .draft
-            .new_keys
+            .added
+            .keys
             .read()
             .expect("no writer panics holding the lock");
 
@@ -546,17 +595,18 @@ impl<'a> View<'a> {
 
     /// A node's primary key.
     pub fn key(&self, g: node::GlobalId) -> Vec<u8> {
-        if g.0 < self.draft.base_nodes {
+        if g.0 < self.draft.frozen.nodes {
             return self.graph.keys.get(g).to_vec();
         }
 
         let keys = self
             .draft
-            .new_keys
+            .added
+            .keys
             .read()
             .expect("no writer panics holding the lock");
 
-        keys.by_node[(g.0 - self.draft.base_nodes) as usize].clone()
+        keys.by_node[(g.0 - self.draft.frozen.nodes) as usize].clone()
     }
 
 
@@ -568,7 +618,7 @@ impl<'a> View<'a> {
         let packed = (first..first + map.count(node_type)).map(node::GlobalId);
 
         // Added nodes of this type, in the order they were added (which is their position order).
-        let added = (self.draft.base_nodes..self.nodes)
+        let added = (self.draft.frozen.nodes..self.nodes)
             .map(node::GlobalId)
             .filter(|&g| self.get(g).0 == node_type);
 
@@ -579,7 +629,7 @@ impl<'a> View<'a> {
     /// How many nodes of `node_type` this view sees: packed ones plus those added up to `upto`.
     pub fn count(&self, node_type: node_type::Id) -> u64 {
         let packed = self.graph.node_type_mappings.count(node_type);
-        let added = &self.draft.new_by_type[node_type];
+        let added = &self.draft.added.by_type[node_type];
 
         // Added nodes are in action order: drop the ones published after this view.
         let mut visible = added.len();

@@ -125,7 +125,7 @@ The packed arrays never change. Edits land in structures beside them:
 | Edit | Where it goes |
 |---|---|
 | link added | the side store: per link type and direction, chunks of entries per node, each with its action's sequence number |
-| link removed | a bit per packed position (`removed`), or a removal number on a side-store entry |
+| link removed | a bit per packed position (`frozen.removed_links`), or a removal number on a side-store entry |
 | node added | appended after the packed nodes, with its type, position and key |
 | node deleted | a bit per node |
 | property changed | a change log per property |

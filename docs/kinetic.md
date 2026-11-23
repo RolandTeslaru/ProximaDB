@@ -40,13 +40,13 @@ After the call:
 | Where | What changed |
 |---|---|
 | the packed graph (`storage::Graph`) | **nothing**: its arrays never change |
-| `Draft::new_nodes`, `new_seqs`, `new_by_type` | dan: node number 3 (after the 3 packed users), added by action 1235 |
-| `Draft::new_keys` | (User, "dan") → node 3 |
-| the side store, FOLLOWS forward | under dan: an entry → ana, action 1235 |
-| the side store, FOLLOWS backward | under ana: an entry → dan, action 1235 |
-| `Draft::changed` | the bits of dan and ana: walks now read their side-store entries |
+| `added.nodes`, `added.node_seqs`, `added.by_type` | dan: node number 3 (after the 3 packed users), added by action 1235 |
+| `added.keys` | (User, "dan") → node 3 |
+| `added.links` (the side store), FOLLOWS forward | under dan: an entry → ana, action 1235 |
+| `added.links`, FOLLOWS backward | under ana: an entry → dan, action 1235 |
+| `marks.changed` | the bits of dan and ana: walks now read their side-store entries |
 | the property log of User.status | (ana, "inactive", action 1235) |
-| `Draft::published` | 1234 → 1235 |
+| `published` | 1234 → 1235 |
 | the writer's journal | the three edits, each with 1235, for the next rebuild |
 | the server's kept actions | the whole action, for replay after a reload |
 
@@ -71,19 +71,28 @@ A search that started before the publish still sees action 1234: three users, an
 | `Store` | `kinetic/store.rs:45` | the current generation, and the writer's state while no writer is out |
 | `Writer` | `kinetic/store.rs:151` | the only way to write; there is one at a time. Journals each edit and runs rebuilds |
 | `Editor` | `kinetic/editor.rs:23` | applies edits to one generation: numbers new nodes and links, fills the structures below |
-| `Generation` | `kinetic/draft.rs:75` | a frozen packed graph plus its `Draft`: the edits made on it since it was built |
+| `Generation` | `kinetic/draft.rs:98` | a frozen packed graph plus its `Draft`: the edits made on it since it was built |
 | `Draft` | `kinetic/draft.rs:52` | the edits, beside the packed arrays, and the last published action |
-| `View` | `kinetic/draft.rs:340` | what a search reads: a generation as of one published action (`upto`) |
+| `View` | `kinetic/draft.rs:388` | what a search reads: a generation as of one published action (`upto`) |
 
-Inside `Draft`, one structure per kind of edit:
+Inside `Draft`, the fields are grouped by what they're about:
+
+| Group | Holds |
+|---|---|
+| `frozen` | the frozen graph's node count, from which added nodes are numbered, and its removed links |
+| `added` | what actions added: nodes, their actions and keys, and links |
+| `marks` | the bits walks check per node: changed links, deleted |
+| `published`, `property_logs` | the last published action; property changes of frozen and added nodes alike |
+
+One structure per kind of edit:
 
 | Edit | Structure | Carries the action's number |
 |---|---|---|
-| node added | `new_nodes` (type and position), `new_seqs`, `new_by_type`, `new_keys` | yes |
-| link added | the side store (`kinetic/side.rs`): per link type and direction, chunks of 8 entries per node | yes |
+| node added | `added.nodes` (type and position), `added.node_seqs`, `added.by_type`, `added.keys` | yes |
+| link added | `added.links`, the side store (`kinetic/side.rs`): per link type and direction, chunks of 8 entries per node | yes |
 | link removed, if it was added since the rebuild | its side-store entry gets a removal number | yes |
-| link removed, if it was packed | a bit in `removed`, one per packed position | **no** |
-| node deleted | a bit in `deleted` | **no** |
+| link removed, if it was packed | a bit in `frozen.removed_links`, one per packed position | **no** |
+| node deleted | a bit in `marks.deleted` | **no** |
 | property set | the property's log (`kinetic/changes.rs`): (position, value, action) | yes |
 
 Edits carrying the action's number are invisible to views pinned before it. The two without one can be seen by a search
@@ -141,7 +150,7 @@ sequenceDiagram
       | add link | `add_link` (`editor.rs:152`) | an entry in both directions' side stores; both ends marked changed |
       | remove link | `remove_link` (`editor.rs:196`) | the packed position's removed bit, or the side-store entry's removal number |
 
-   4. `writer.commit()` (`store.rs:200`): **`Draft::publish`** (`draft.rs:259`) stores the sequence number, the one
+   4. `writer.commit()` (`store.rs:200`): **`Draft::publish`** (`draft.rs:305`) stores the sequence number, the one
       moment the whole action becomes visible. Then `check` (`store.rs:213`) swaps in a finished rebuild, or starts one
       if the edits passed the limit (§6).
 4. **`WriterThread::action`** (`writes.rs:123`): tells reads waiting on `after` that the action is in, and keeps it
@@ -153,15 +162,15 @@ sequenceDiagram
 1. **`wait_for`** (`state.rs:93`): with `after: N`, the read waits until action N is published, up to 10 s (else
    504). This is read-your-writes: send an action, get its `seq` back, pass it as `after`.
 2. **`on_pool`** (`state.rs:69`): the read takes one of the read slots (one per core) and runs on the rayon pool.
-3. **`Generation::view`** (`draft.rs:90`, `Draft::view` at `:152`): reads `published` once, as `upto`. The node count
-   comes from it too (`new_nodes_upto`, a binary search over `new_seqs`), so a view can't count a node its action
+3. **`Generation::view`** (`draft.rs:113`, `Draft::view` at `:181`): reads `published` once, as `upto`. The node count
+   comes from it too (`added_nodes_upto`, a binary search over `added.node_seqs`), so a view can't count a node its action
    hasn't published.
 4. **The walk** reads through the view. For each node it looks at the packed row; only if the node's changed bit is set
-   (`View::for_each`, `draft.rs:442`) does it skip removed packed links and add side-store entries with
+   (`View::for_each`, `draft.rs:490`) does it skip removed packed links and add side-store entries with
    `seq <= upto` (`side.rs:140`). Property conditions apply logged changes with `seq <= upto` (`condition.rs:394`).
 5. The answer carries `seq`: the `upto` it read.
 
-Reads never take the writer's lock. Looking up a key added since the rebuild takes a short read lock on `new_keys`.
+Reads never take the writer's lock. Looking up a key added since the rebuild takes a short read lock on `added.keys`.
 
 
 ## 6. Rebuilds
