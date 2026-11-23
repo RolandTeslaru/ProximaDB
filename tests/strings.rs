@@ -13,7 +13,7 @@ use proximadb::query::condition::{self, Condition, Op};
 use proximadb::query::cypher;
 use proximadb::storage::node_type::Id as TypeId;
 use proximadb::storage::property::Column;
-use proximadb::{Graph, Live, Store, View};
+use proximadb::{Draft, Graph, Store, View};
 
 const PERSON: TypeId = TypeId(0);
 
@@ -278,9 +278,9 @@ fn the_list_has_no_repeats() {
 fn weird_strings_through_csv() {
     let strings = weird();
     let graph = from_csv(&strings);
-    let live = Live::new(&graph);
+    let draft = Draft::new(&graph);
 
-    every_string_is_itself(&live.view(&graph), &strings, "CSV");
+    every_string_is_itself(&draft.view(&graph), &strings, "CSV");
 }
 
 
@@ -288,9 +288,9 @@ fn weird_strings_through_csv() {
 fn weird_strings_through_parquet() {
     let strings = weird();
     let graph = from_parquet(&strings);
-    let live = Live::new(&graph);
+    let draft = Draft::new(&graph);
 
-    every_string_is_itself(&live.view(&graph), &strings, "Parquet");
+    every_string_is_itself(&draft.view(&graph), &strings, "Parquet");
 }
 
 
@@ -333,8 +333,8 @@ fn weird_strings_as_coded_values() {
         Column::Coded8 { .. }
     ));
 
-    let live = Live::new(&graph);
-    let view = live.view(&graph);
+    let draft = Draft::new(&graph);
+    let view = draft.view(&graph);
 
     for text in &strings {
         let equal = Condition::compare("value", Op::Eq, Value::Str(text.clone()));
@@ -374,8 +374,8 @@ fn every_column_shape_boundary() {
         };
         assert_eq!(shape, expected, "{distinct} distinct values");
 
-        let live = Live::new(&graph);
-        let view = live.view(&graph);
+        let draft = Draft::new(&graph);
+        let view = draft.view(&graph);
 
         for wanted in [0, distinct / 2, distinct - 1] {
             let equal = Condition::compare("value", Op::Eq, Value::Str(format!("v{wanted}")));
@@ -400,8 +400,8 @@ fn every_column_shape_boundary() {
 fn a_parameter_is_data_never_query_text() {
     let strings = weird();
     let graph = from_csv(&strings);
-    let live = Live::new(&graph);
-    let view = live.view(&graph);
+    let draft = Draft::new(&graph);
+    let view = draft.view(&graph);
 
     for attack in ["x' OR a.value <> '", "plain'}) RETURN a //", "$who"] {
         let params = HashMap::from([("who".to_string(), Value::Str(attack.into()))]);
@@ -423,8 +423,8 @@ fn a_parameter_is_data_never_query_text() {
 fn every_unicode_character_in_a_query() {
     let strings = ["ana".to_string()];
     let graph = from_csv(&strings);
-    let live = Live::new(&graph);
-    let view = live.view(&graph);
+    let draft = Draft::new(&graph);
+    let view = draft.view(&graph);
     let params = HashMap::new();
 
     for c in (0..=0x10_FFFF).filter_map(char::from_u32) {

@@ -8,7 +8,7 @@ use crate::collections::IndexVec;
 use crate::collections::bitset::{AtomicBitset, Bitset};
 use crate::core::Direction;
 use crate::core::node::GlobalId;
-use crate::kinetic::live::{TableRef, View};
+use crate::kinetic::draft::{TableRef, View};
 use crate::storage::graph::Graph;
 use crate::storage::link_type;
 use crate::storage::node_type;

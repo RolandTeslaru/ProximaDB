@@ -40,13 +40,13 @@ After the call:
 | Where | What changed |
 |---|---|
 | the packed graph (`storage::Graph`) | **nothing**: its arrays never change |
-| `Live::new_nodes`, `new_seqs`, `new_by_type` | dan: node number 3 (after the 3 packed users), added by action 1235 |
-| `Live::new_keys` | (User, "dan") → node 3 |
+| `Draft::new_nodes`, `new_seqs`, `new_by_type` | dan: node number 3 (after the 3 packed users), added by action 1235 |
+| `Draft::new_keys` | (User, "dan") → node 3 |
 | the side store, FOLLOWS forward | under dan: an entry → ana, action 1235 |
 | the side store, FOLLOWS backward | under ana: an entry → dan, action 1235 |
-| `Live::changed` | the bits of dan and ana: walks now read their side-store entries |
+| `Draft::changed` | the bits of dan and ana: walks now read their side-store entries |
 | the property log of User.status | (ana, "inactive", action 1235) |
-| `Live::published` | 1234 → 1235 |
+| `Draft::published` | 1234 → 1235 |
 | the writer's journal | the three edits, each with 1235, for the next rebuild |
 | the server's kept actions | the whole action, for replay after a reload |
 
@@ -71,11 +71,11 @@ A search that started before the publish still sees action 1234: three users, an
 | `Store` | `kinetic/store.rs:45` | the current generation, and the writer's state while no writer is out |
 | `Writer` | `kinetic/store.rs:151` | the only way to write; there is one at a time. Journals each edit and runs rebuilds |
 | `Editor` | `kinetic/editor.rs:23` | applies edits to one generation: numbers new nodes and links, fills the structures below |
-| `Generation` | `kinetic/live.rs:75` | one packed graph plus `Live`, the edits made on it since it was built |
-| `Live` | `kinetic/live.rs:52` | the edits, beside the packed arrays, and the last published action |
-| `View` | `kinetic/live.rs:340` | what a search reads: a generation as of one published action (`upto`) |
+| `Generation` | `kinetic/draft.rs:75` | a frozen packed graph plus its `Draft`: the edits made on it since it was built |
+| `Draft` | `kinetic/draft.rs:52` | the edits, beside the packed arrays, and the last published action |
+| `View` | `kinetic/draft.rs:340` | what a search reads: a generation as of one published action (`upto`) |
 
-Inside `Live`, one structure per kind of edit:
+Inside `Draft`, one structure per kind of edit:
 
 | Edit | Structure | Carries the action's number |
 |---|---|---|
@@ -99,7 +99,7 @@ sequenceDiagram
     participant W as Writer thread
     participant C as ActionChecker
     participant E as Writer / Editor
-    participant L as Live
+    participant L as Draft
 
     Q->>H: POST /actions {seq, edits}
     H->>W: WriteJob::Action through the queue (1,024 deep)
@@ -135,13 +135,13 @@ sequenceDiagram
 
       | Edit | `Editor` method | What it writes |
       |---|---|---|
-      | add node | `add_node` (`editor.rs:111`) | the next node number; type, position, key and action in `Live` |
+      | add node | `add_node` (`editor.rs:111`) | the next node number; type, position, key and action in `Draft` |
       | set property | `set_property` (`editor.rs:131`) | a `Change` in the property's log |
       | delete node | `delete_node` (`editor.rs:146`) | the node's deleted bit |
       | add link | `add_link` (`editor.rs:152`) | an entry in both directions' side stores; both ends marked changed |
       | remove link | `remove_link` (`editor.rs:196`) | the packed position's removed bit, or the side-store entry's removal number |
 
-   4. `writer.commit()` (`store.rs:200`): **`Live::publish`** (`live.rs:259`) stores the sequence number, the one
+   4. `writer.commit()` (`store.rs:200`): **`Draft::publish`** (`draft.rs:259`) stores the sequence number, the one
       moment the whole action becomes visible. Then `check` (`store.rs:213`) swaps in a finished rebuild, or starts one
       if the edits passed the limit (§6).
 4. **`WriterThread::action`** (`writes.rs:123`): tells reads waiting on `after` that the action is in, and keeps it
@@ -153,11 +153,11 @@ sequenceDiagram
 1. **`wait_for`** (`state.rs:93`): with `after: N`, the read waits until action N is published, up to 10 s (else
    504). This is read-your-writes: send an action, get its `seq` back, pass it as `after`.
 2. **`on_pool`** (`state.rs:69`): the read takes one of the read slots (one per core) and runs on the rayon pool.
-3. **`Generation::view`** (`live.rs:90`, `Live::view` at `:152`): reads `published` once, as `upto`. The node count
+3. **`Generation::view`** (`draft.rs:90`, `Draft::view` at `:152`): reads `published` once, as `upto`. The node count
    comes from it too (`new_nodes_upto`, a binary search over `new_seqs`), so a view can't count a node its action
    hasn't published.
 4. **The walk** reads through the view. For each node it looks at the packed row; only if the node's changed bit is set
-   (`View::for_each`, `live.rs:442`) does it skip removed packed links and add side-store entries with
+   (`View::for_each`, `draft.rs:442`) does it skip removed packed links and add side-store entries with
    `seq <= upto` (`side.rs:140`). Property conditions apply logged changes with `seq <= upto` (`condition.rs:394`).
 5. The answer carries `seq`: the `upto` it read.
 

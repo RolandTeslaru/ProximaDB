@@ -16,7 +16,7 @@ use crate::storage::link_type::{self, Table};
 use crate::storage::node_type;
 
 use super::changes::{Change, encode, property_index};
-use super::live::{BACKWARD, FORWARD, Generation, Live};
+use super::draft::{BACKWARD, Draft, FORWARD, Generation};
 use super::side::Entry;
 
 
@@ -52,7 +52,7 @@ impl Editor {
             .map(|storage| storage.forward.len() as u32)
             .collect();
 
-        let seq = generation.live.published();
+        let seq = generation.draft.published();
         let nodes = view.nodes;
 
         Self {
@@ -71,8 +71,8 @@ impl Editor {
     }
 
 
-    fn live(&self) -> &Live {
-        &self.generation.live
+    fn draft(&self) -> &Draft {
+        &self.generation.draft
     }
 
 
@@ -83,7 +83,7 @@ impl Editor {
 
 
     pub fn begin(&mut self, seq: u64) {
-        assert!(seq > self.live().published(), "sequence numbers must grow");
+        assert!(seq > self.draft().published(), "sequence numbers must grow");
 
         self.seq = seq;
     }
@@ -91,20 +91,20 @@ impl Editor {
 
     /// Publishes `seq` with no edits of its own, if it is ahead of the last published action.
     pub fn publish_at_least(&mut self, seq: u64) {
-        if seq > self.live().published() {
+        if seq > self.draft().published() {
             self.seq = seq;
-            self.live().publish(seq);
+            self.draft().publish(seq);
         }
     }
 
 
     pub fn commit(&mut self) {
-        self.live().publish(self.seq);
+        self.draft().publish(self.seq);
     }
 
 
     pub fn get(&self, g: node::GlobalId) -> (node_type::Id, node::Id) {
-        self.live().node(&self.generation.graph, g)
+        self.draft().node(&self.generation.graph, g)
     }
 
 
@@ -112,7 +112,7 @@ impl Editor {
         let node = node::GlobalId(self.nodes);
         let position = self.counts[node_type];
 
-        self.live()
+        self.draft()
             .add_node(node, node_type, position, key, self.seq);
 
         self.counts[node_type] += 1;
@@ -131,7 +131,7 @@ impl Editor {
     pub fn set_property(&mut self, node: node::GlobalId, property: usize, value: &Value) {
         let (node_type, position) = self.get(node);
         let column = &self.generation.graph.node_types[node_type].properties[property];
-        let log = self.live().property_log(node_type, property);
+        let log = self.draft().property_log(node_type, property);
 
         let change = Change {
             local: position.0 as u64,
@@ -139,12 +139,12 @@ impl Editor {
             seq: self.seq,
         };
 
-        self.live().log_change(node_type, property, change);
+        self.draft().log_change(node_type, property, change);
     }
 
 
     pub fn delete_node(&mut self, node: node::GlobalId) {
-        self.live().delete(node);
+        self.draft().delete(node);
     }
 
 
@@ -169,7 +169,7 @@ impl Editor {
         self.next_link[link_type] += 1;
 
         for (side, node, other) in [(FORWARD, from, to), (BACKWARD, to, from)] {
-            self.live().mark_changed(node);
+            self.draft().mark_changed(node);
 
             let entry = Entry {
                 target: other,
@@ -179,7 +179,7 @@ impl Editor {
 
             let mut tail = self.tails[link_type][side].get(&node.0).copied();
 
-            self.live()
+            self.draft()
                 .side(link_type, side)
                 .push(node, entry, &mut tail);
 
@@ -211,14 +211,14 @@ impl Editor {
             (FORWARD, &storage.forward, from, to),
             (BACKWARD, &storage.backward, to, from),
         ] {
-            let removed_bits = self.live().removed(link_type, side);
-            let side_table = self.live().side(link_type, side);
+            let removed_bits = self.draft().removed(link_type, side);
+            let side_table = self.draft().side(link_type, side);
 
             let removed = self.remove_packed(table, removed_bits, node, other)
                 || side_table.remove(node, other, self.seq).is_some();
 
             if removed {
-                self.live().mark_changed(node);
+                self.draft().mark_changed(node);
                 found = true;
             }
         }
@@ -235,7 +235,7 @@ impl Editor {
         node: node::GlobalId,
         other: node::GlobalId,
     ) -> bool {
-        let base_nodes = self.live().base_nodes();
+        let base_nodes = self.draft().base_nodes();
 
         if node.0 >= base_nodes || other.0 >= base_nodes {
             return false;

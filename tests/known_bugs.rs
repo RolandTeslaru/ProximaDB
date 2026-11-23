@@ -17,7 +17,7 @@ use proximadb::query::cypher;
 use proximadb::query::subgraph::Role;
 use proximadb::query::walk::{self, Reach};
 use proximadb::storage::node_type::Id as TypeId;
-use proximadb::{Live, Store, View};
+use proximadb::{Draft, Store, View};
 
 const PERSON: TypeId = TypeId(0);
 
@@ -201,8 +201,8 @@ fn the_largest_sequence_number_works() {
 fn a_large_integer_key_finds_its_own_node() {
     let rows = [("9007199254740992", "even"), ("9007199254740993", "odd")];
     let graph = people("parity", Kind::String, &rows, &[]);
-    let live = Live::new(&graph);
-    let view = live.view(&graph);
+    let draft = Draft::new(&graph);
+    let view = draft.view(&graph);
 
     let found = cypher::run(
         &view,
@@ -225,11 +225,11 @@ fn a_large_integer_key_finds_its_own_node() {
 fn long_values_compare_exactly() {
     let rows = [("a", "9007199254740992"), ("b", "9007199254740993")];
     let graph = people("n", Kind::Long, &rows, &[]);
-    let live = Live::new(&graph);
+    let draft = Draft::new(&graph);
 
     assert_eq!(
         matching(
-            &live.view(&graph),
+            &draft.view(&graph),
             "n",
             Op::Eq,
             Value::Num(9_007_199_254_740_992.0)
@@ -243,10 +243,10 @@ fn long_values_compare_exactly() {
 #[ignore = "bug: an integer beyond 32 bits wraps round when loaded"]
 fn a_loaded_integer_doesnt_wrap() {
     let graph = people("n", Kind::Integer, &[("ana", "3000000000")], &[]);
-    let live = Live::new(&graph);
+    let draft = Draft::new(&graph);
 
     assert_eq!(
-        matching(&live.view(&graph), "n", Op::Lt, Value::Num(0.0)),
+        matching(&draft.view(&graph), "n", Op::Lt, Value::Num(0.0)),
         0
     );
 }
@@ -372,10 +372,10 @@ fn timestamp_offsets_are_applied() {
         ("plus2", "2026-01-01T10:00:00+02:00"),
     ];
     let graph = people("at", Kind::Timestamp, &rows, &[]);
-    let live = Live::new(&graph);
+    let draft = Draft::new(&graph);
     let eight_utc = Value::Num(1_767_254_400_000_000.0);
 
-    assert_eq!(matching(&live.view(&graph), "at", Op::Eq, eight_utc), 2);
+    assert_eq!(matching(&draft.view(&graph), "at", Op::Eq, eight_utc), 2);
 }
 
 
@@ -413,12 +413,12 @@ fn string_ordering_doesnt_depend_on_the_data() {
 fn one_name_means_one_node() {
     let rows = [("ana", "on"), ("ben", "on")];
     let graph = people("status", Kind::String, &rows, &[("ana", "ben")]);
-    let live = Live::new(&graph);
+    let draft = Draft::new(&graph);
 
     let query = "MATCH (a:Person {key: 'ana'})-[:FOLLOWS]->(a:Person) RETURN a";
 
     // ana doesn't follow herself: zero, or an error saying this isn't supported.
-    if let Ok(answer) = cypher::run(&live.view(&graph), query, &HashMap::new()) {
+    if let Ok(answer) = cypher::run(&draft.view(&graph), query, &HashMap::new()) {
         assert_eq!(answer.count, Some(0));
     }
 }
@@ -434,8 +434,8 @@ fn a_loop_keeps_its_start() {
         &rows,
         &[("ana", "ben"), ("ben", "ana")],
     );
-    let live = Live::new(&graph);
-    let view = live.view(&graph);
+    let draft = Draft::new(&graph);
+    let view = draft.view(&graph);
 
     let answer = ask(
         &view,
@@ -457,8 +457,8 @@ fn limit_counts_each_match_once() {
         ("ben", "cleo"),
     ];
     let graph = people("status", Kind::String, &rows, &follows);
-    let live = Live::new(&graph);
-    let view = live.view(&graph);
+    let draft = Draft::new(&graph);
+    let view = draft.view(&graph);
 
     let answer = ask(
         &view,
@@ -474,10 +474,10 @@ fn limit_counts_each_match_once() {
 fn a_link_isnt_walked_back_over() {
     let rows = [("ana", "on"), ("ben", "on")];
     let graph = people("status", Kind::String, &rows, &[("ana", "ben")]);
-    let live = Live::new(&graph);
+    let draft = Draft::new(&graph);
 
     let answer = ask(
-        &live.view(&graph),
+        &draft.view(&graph),
         "MATCH (a:Person {key: 'ana'})-[:FOLLOWS*1..2]-(b:Person) RETURN count(b)",
     );
 

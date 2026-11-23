@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::core::Value;
-use crate::kinetic::live::View;
+use crate::kinetic::draft::View;
 use crate::query::subgraph::Subgraph;
 
 /// At most this many nodes come back in a graph answer; the count stays exact.

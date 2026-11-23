@@ -10,5 +10,5 @@ pub mod query;
 pub mod storage;
 
 pub use collections::{AtomicBitset, Bitset};
-pub use kinetic::{Generation, Live, Store, View, Writer};
+pub use kinetic::{Draft, Generation, Store, View, Writer};
 pub use storage::Graph;

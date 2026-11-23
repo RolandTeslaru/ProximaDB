@@ -126,7 +126,7 @@ fn print_skipped(report: &load::Report) {
 
 fn start_writer(store: &'static Store, source: Source) -> Shared {
     let (writes, queue) = mpsc::channel(writes::WRITE_QUEUE);
-    let (published_sender, published) = watch::channel(store.current().live.published());
+    let (published_sender, published) = watch::channel(store.current().draft.published());
 
     std::thread::Builder::new()
         .name("writer".into())

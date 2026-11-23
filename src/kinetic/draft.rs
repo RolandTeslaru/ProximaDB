@@ -49,7 +49,7 @@ struct NewKeys {
 }
 
 
-pub struct Live {
+pub struct Draft {
     published: AtomicU64,
     any_changes: AtomicBool,
     any_deleted: AtomicBool,
@@ -74,26 +74,26 @@ pub struct Live {
 /// A packed graph and the edits made on it since it was built.
 pub struct Generation {
     pub graph: Graph,
-    pub live: Live,
+    pub draft: Draft,
 }
 
 
 impl Generation {
     pub fn new(graph: Graph) -> Self {
-        let live = Live::new(&graph);
+        let draft = Draft::new(&graph);
 
-        Self { graph, live }
+        Self { graph, draft }
     }
 
 
     /// A consistent view as of the last published action.
     pub fn view(&self) -> View<'_> {
-        self.live.view(&self.graph)
+        self.draft.view(&self.graph)
     }
 }
 
 
-impl Live {
+impl Draft {
     pub fn new(graph: &Graph) -> Self {
         Self::starting_at(graph, 0)
     }
@@ -154,7 +154,7 @@ impl Live {
 
         View {
             graph,
-            live: self,
+            draft: self,
             upto,
             nodes: self.base_nodes + self.new_nodes_upto(upto),
             any_changes: self.any_changes.load(Ordering::Acquire),
@@ -339,7 +339,7 @@ impl TableRef<'_> {
 /// What a search sees: everything published up to `upto`.
 pub struct View<'a> {
     pub graph: &'a Graph,
-    pub live: &'a Live,
+    pub draft: &'a Draft,
     pub upto: u64,
     pub nodes: u64,
     any_changes: bool,
@@ -355,14 +355,14 @@ impl<'a> View<'a> {
 
     #[inline]
     pub fn get(&self, g: node::GlobalId) -> (node_type::Id, node::Id) {
-        self.live.node(self.graph, g)
+        self.draft.node(self.graph, g)
     }
 
 
     /// Position within `node_type` of node `g`, which must be of that type. No type lookup for packed nodes.
     #[inline]
     pub fn position(&self, node_type: node_type::Id, g: node::GlobalId) -> node::Id {
-        if g.0 < self.live.base_nodes {
+        if g.0 < self.draft.base_nodes {
             return self.graph.node_type_mappings.position(node_type, g);
         }
 
@@ -372,7 +372,7 @@ impl<'a> View<'a> {
 
     #[inline]
     pub fn type_of(&self, g: node::GlobalId) -> node_type::Id {
-        if g.0 < self.live.base_nodes {
+        if g.0 < self.draft.base_nodes {
             return self.graph.node_type_mappings.type_of(g);
         }
 
@@ -382,7 +382,7 @@ impl<'a> View<'a> {
 
     #[inline]
     pub fn is_deleted(&self, g: node::GlobalId) -> bool {
-        self.any_deleted && self.live.deleted.get(g.0)
+        self.any_deleted && self.draft.deleted.get(g.0)
     }
 
 
@@ -403,8 +403,8 @@ impl<'a> View<'a> {
             if matches!(direction, Direction::Forward | Direction::Both) {
                 tables[storage.from_type].push(TableRef {
                     base: &storage.forward,
-                    side: self.live.side(link_type, FORWARD),
-                    removed: self.live.removed(link_type, FORWARD),
+                    side: self.draft.side(link_type, FORWARD),
+                    removed: self.draft.removed(link_type, FORWARD),
                     row_first: from_first,
                     other_first: to_first,
                     other_type: storage.to_type,
@@ -416,8 +416,8 @@ impl<'a> View<'a> {
             if matches!(direction, Direction::Backward | Direction::Both) {
                 tables[storage.to_type].push(TableRef {
                     base: &storage.backward,
-                    side: self.live.side(link_type, BACKWARD),
-                    removed: self.live.removed(link_type, BACKWARD),
+                    side: self.draft.side(link_type, BACKWARD),
+                    removed: self.draft.removed(link_type, BACKWARD),
                     row_first: to_first,
                     other_first: from_first,
                     other_type: storage.from_type,
@@ -433,7 +433,7 @@ impl<'a> View<'a> {
 
     #[inline]
     fn changed(&self, u: node::GlobalId) -> bool {
-        self.any_changes && self.live.changed.get(u.0)
+        self.any_changes && self.draft.changed.get(u.0)
     }
 
 
@@ -442,7 +442,7 @@ impl<'a> View<'a> {
     pub fn for_each(&self, table: &TableRef, u: node::GlobalId, mut f: impl FnMut(node::GlobalId)) {
         let changed = self.changed(u);
 
-        if u.0 < self.live.base_nodes {
+        if u.0 < self.draft.base_nodes {
             let range = table.base.range(table.row(u));
 
             if changed {
@@ -475,7 +475,7 @@ impl<'a> View<'a> {
     ) -> bool {
         let changed = self.changed(u);
 
-        if u.0 < self.live.base_nodes {
+        if u.0 < self.draft.base_nodes {
             for position in table.base.range(table.row(u)) {
                 *checked += 1;
 
@@ -508,7 +508,7 @@ impl<'a> View<'a> {
     /// Links of `u` in the packed part of this table (added links aren't counted).
     #[inline]
     pub fn degree(&self, table: &TableRef, u: node::GlobalId) -> u64 {
-        if u.0 < self.live.base_nodes {
+        if u.0 < self.draft.base_nodes {
             return table.base.degree(table.row(u));
         }
 
@@ -531,7 +531,7 @@ impl<'a> View<'a> {
         }
 
         let keys = self
-            .live
+            .draft
             .new_keys
             .read()
             .expect("no writer panics holding the lock");
@@ -546,17 +546,17 @@ impl<'a> View<'a> {
 
     /// A node's primary key.
     pub fn key(&self, g: node::GlobalId) -> Vec<u8> {
-        if g.0 < self.live.base_nodes {
+        if g.0 < self.draft.base_nodes {
             return self.graph.keys.get(g).to_vec();
         }
 
         let keys = self
-            .live
+            .draft
             .new_keys
             .read()
             .expect("no writer panics holding the lock");
 
-        keys.by_node[(g.0 - self.live.base_nodes) as usize].clone()
+        keys.by_node[(g.0 - self.draft.base_nodes) as usize].clone()
     }
 
 
@@ -568,7 +568,7 @@ impl<'a> View<'a> {
         let packed = (first..first + map.count(node_type)).map(node::GlobalId);
 
         // Added nodes of this type, in the order they were added (which is their position order).
-        let added = (self.live.base_nodes..self.nodes)
+        let added = (self.draft.base_nodes..self.nodes)
             .map(node::GlobalId)
             .filter(|&g| self.get(g).0 == node_type);
 
@@ -579,7 +579,7 @@ impl<'a> View<'a> {
     /// How many nodes of `node_type` this view sees: packed ones plus those added up to `upto`.
     pub fn count(&self, node_type: node_type::Id) -> u64 {
         let packed = self.graph.node_type_mappings.count(node_type);
-        let added = &self.live.new_by_type[node_type];
+        let added = &self.draft.new_by_type[node_type];
 
         // Added nodes are in action order: drop the ones published after this view.
         let mut visible = added.len();

@@ -12,7 +12,7 @@ mod common;
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 
-use proximadb::Live;
+use proximadb::Draft;
 use proximadb::core::Kind;
 use proximadb::load::{self, Backing, LinkTypeSpec, NodeTypeSpec, Report, Schema, Side};
 use proximadb::query::cypher;
@@ -80,8 +80,8 @@ fn graph() -> (Graph, Report) {
 
 
 fn matches(graph: &Graph, query: &str) -> BTreeSet<String> {
-    let live = Live::new(graph);
-    let view = live.view(graph);
+    let draft = Draft::new(graph);
+    let view = draft.view(graph);
 
     let answer =
         cypher::run(&view, query, &HashMap::new()).unwrap_or_else(|e| panic!("{query}: {e}"));

@@ -16,7 +16,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::PathBuf;
 
-use proximadb::Live;
+use proximadb::Draft;
 use proximadb::core::Kind;
 use proximadb::load::{self, Backing, LinkTypeSpec, NodeTypeSpec, Schema};
 use proximadb::query::cypher::{self, Answer};
@@ -87,16 +87,16 @@ fn link_type(name: &str, from: &str, to: &str) -> LinkTypeSpec {
 
 
 fn run(graph: &Graph, query: &str) -> Answer {
-    let live = Live::new(graph);
-    let view = live.view(graph);
+    let draft = Draft::new(graph);
+    let view = draft.view(graph);
 
     cypher::run(&view, query, &HashMap::new()).unwrap_or_else(|e| panic!("{query}: {e}"))
 }
 
 
 fn error(graph: &Graph, query: &str) -> String {
-    let live = Live::new(graph);
-    let view = live.view(graph);
+    let draft = Draft::new(graph);
+    let view = draft.view(graph);
 
     match cypher::run(&view, query, &HashMap::new()) {
         Ok(_) => panic!("{query}: expected an error"),

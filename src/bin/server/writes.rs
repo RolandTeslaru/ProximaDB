@@ -157,7 +157,7 @@ impl WriterThread {
             ));
         }
 
-        let before = self.writer.generation().live.published();
+        let before = self.writer.generation().draft.published();
 
         self.writer.replace(graph, as_of_seq);
 
@@ -184,7 +184,7 @@ impl WriterThread {
         self.kept.retain(|action| action.seq > as_of_seq);
         self.dropped_through = self.dropped_through.max(as_of_seq);
 
-        let seq = self.writer.generation().live.published();
+        let seq = self.writer.generation().draft.published();
         let _ = self.published.send(seq);
 
         Ok(Swapped {
@@ -198,7 +198,7 @@ impl WriterThread {
 
 /// Checks and applies one action; nothing is applied unless all of it is valid.
 fn apply(writer: &mut Writer, action: ActionRequest) -> Result<ActionResponse, String> {
-    let last = writer.generation().live.published();
+    let last = writer.generation().draft.published();
 
     if action.seq <= last {
         return Err(format!(

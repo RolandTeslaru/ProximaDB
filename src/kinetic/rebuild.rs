@@ -1,6 +1,6 @@
 //! The rebuild: a new packed graph from the old packed graph plus the actions since it was built.
 //!
-//! It reads only the old packed arrays and the writer's journal (never the live edit structures), so it sees exactly
+//! It reads only the old packed arrays and the writer's journal (never the draft edit structures), so it sees exactly
 //! the actions up to the point it started. In order:
 //!
 //!   1. Read the journal: added and deleted nodes, the latest value of each changed property, and per link type the

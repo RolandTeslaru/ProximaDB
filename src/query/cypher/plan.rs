@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use crate::collections::Bitset;
 use crate::core::node::GlobalId;
 use crate::core::{Direction, Value};
-use crate::kinetic::live::View;
+use crate::kinetic::draft::View;
 use crate::query::condition::{self, Condition, Op};
 use crate::query::subgraph::{self, EndFilter, Role, Subgraph};
 use crate::query::walk::{self, Reach, Through};

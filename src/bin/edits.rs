@@ -299,7 +299,7 @@ fn main() {
             .iter()
             .map(|r| r.forward.len())
             .sum::<usize>(),
-        g.live.bytes() as f64 / 1e6,
+        g.draft.bytes() as f64 / 1e6,
         peak_rss_bytes() as f64 / 1e9
     );
     let now = split(&v, user, follows, &active, &starts_in(&v));

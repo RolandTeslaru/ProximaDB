@@ -58,8 +58,8 @@ fn lines(w: Work, filtered: bool) -> f64 {
 fn main() {
     let dir = PathBuf::from(std::env::args().nth(1).unwrap_or("research/data/M".into()));
     let graph = load::load(&dir, &schema()).expect("load");
-    let live = proximadb::Live::new(&graph);
-    let view = live.view(&graph);
+    let draft = proximadb::Draft::new(&graph);
+    let view = draft.view(&graph);
     let params: Json =
         serde_json::from_str(&std::fs::read_to_string(dir.join("params.json")).unwrap()).unwrap();
     let starts: Vec<GlobalId> = params["followers"]
